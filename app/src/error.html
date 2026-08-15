@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>服务不可用</title>
+    <style>
+      :root { color-scheme: dark; }
+      body {
+        margin: 0;
+        height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #11141a;
+        color: #e6e8ee;
+        font-family: system-ui, "Segoe UI", "Microsoft YaHei", sans-serif;
+      }
+      .box { max-width: 460px; text-align: center; padding: 24px; }
+      h1 { font-size: 18px; margin: 0 0 12px; }
+      .msg { font-size: 14px; color: #9aa3b2; word-break: break-all; margin-bottom: 24px; }
+      button {
+        padding: 10px 22px;
+        font-size: 14px;
+        border: 0;
+        border-radius: 6px;
+        background: #4f8cff;
+        color: #fff;
+        cursor: pointer;
+      }
+      button:hover { background: #3d79e8; }
+    </style>
+  </head>
+  <body>
+    <div class="box">
+      <h1>DeepSeek Harness 服务不可用</h1>
+      <div class="msg" id="message">未知错误</div>
+      <button id="retry" type="button">重启服务</button>
+    </div>
+    <script>
+      async function loadError() {
+        if (window.dshDesktop && typeof window.dshDesktop.getError === 'function') {
+          const message = await window.dshDesktop.getError();
+          if (message) document.getElementById('message').textContent = message;
+        }
+      }
+      document.getElementById('retry').addEventListener('click', () => {
+        if (window.dshDesktop && typeof window.dshDesktop.restart === 'function') {
+          window.dshDesktop.restart();
+        }
+      });
+      loadError();
+    </script>
+  </body>
+</html>

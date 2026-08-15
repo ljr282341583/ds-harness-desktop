@@ -1,0 +1,11 @@
+# 依赖与运行时（体积大，需本地安装/下载）
+app/node_modules/
+app/runtime/
+
+# 构建产物（安装包等，不入库）
+产出/
+
+# 日志与系统文件
+*.log
+.DS_Store
+Thumbs.db

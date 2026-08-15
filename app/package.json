@@ -1,0 +1,21 @@
+{
+  "name": "ds-harness-desktop",
+  "version": "0.1.0",
+  "description": "DeepSeek Harness 桌面版 —— Electron 壳包裹 dsh web",
+  "main": "src/main.js",
+  "private": true,
+  "author": "DS Harness Desktop",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win",
+    "build:dir": "electron-builder --dir"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh": "^0.1.0-rc.6"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  }
+}
