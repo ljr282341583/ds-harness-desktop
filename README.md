@@ -12,31 +12,40 @@
 
 ## 下载（v0.1.0）
 
-发布在 GitHub Releases，二选一即可（内容相同，仅打包形态不同）：
+编译好的成品发布在 [GitHub Releases](https://github.com/ljr282341583/ds-harness-desktop/releases/tag/v0.1.0)，二选一即可（内容相同，仅打包形态不同）：
 
 | 版本 | 下载 | 说明 |
 |---|---|---|
-| 安装版 | [DS Harness Desktop Setup 0.1.0.exe](https://github.com/ljr282341583/ds-harness-desktop/releases/download/v0.1.0/DS%20Harness%20Desktop%20Setup%200.1.0.exe) | 向导安装，带开始菜单/桌面快捷方式/卸载入口 |
-| 便携版 | [DS Harness Desktop-0.1.0-portable.exe](https://github.com/ljr282341583/ds-harness-desktop/releases/download/v0.1.0/DS%20Harness%20Desktop-0.1.0-portable.exe) | 免安装单文件，双击即用，适合拷贝分发（每次启动需自解压约 2 分钟） |
+| 安装版 | [DS.Harness.Desktop.Setup.0.1.0.exe](https://github.com/ljr282341583/ds-harness-desktop/releases/download/v0.1.0/DS.Harness.Desktop.Setup.0.1.0.exe) | 向导安装，带开始菜单/桌面快捷方式/卸载入口 |
+| 便携版 | [DS.Harness.Desktop-0.1.0-portable.exe](https://github.com/ljr282341583/ds-harness-desktop/releases/download/v0.1.0/DS.Harness.Desktop-0.1.0-portable.exe) | 免安装单文件，双击即用，适合拷贝分发（每次启动需自解压约 2 分钟） |
 
 > 单文件已内置 Electron、Node 24 侧车、dsh 及全部依赖，**无需安装任何运行时**。首次使用在界面 Settings → Models 填自己的 DeepSeek API Key（复用本机 `~/.dsh`）；被 SmartScreen 拦截时点「更多信息 → 仍要运行」。
 
-## 快速上手
+## 快速上手（从源码）
 
-见 `docs\使用方法.md`。已安装或解压后双击 `DS Harness Desktop.exe` 即可；若本机 3080 已有网页版 DSH 在跑，桌面版会直接复用该实例，不重复启动。
+本仓库只含**源码**，不含编译好的安装包（`产出\`、`node_modules\`、`runtime\` 均不入库，需按下面步骤准备；也可直接从上方 Releases 下载成品）。
+
+1. 安装依赖：`cd app && npm install`
+2. 准备 Node 24 侧车（`app\runtime\`）：按 `app\README.md` 的「首次准备」下载
+3. 开发运行：`cd app && npm start`
+4. 打包安装包：`cd app && npm run build`（产物输出到 `产出\`）
+
+> 拿到编译好的成品后如何使用，见 `docs\使用方法.md`；如何把成品分发给别人，见 `docs\分发说明.md`。
 
 ## 目录说明
 
-| 目录/文件 | 用途 |
-|---|---|
-| `README.md` | 本文件：项目说明 |
-| `docs\使用方法.md` | 面向使用者的使用方法 |
-| `docs\分发说明.md` | 面向分发者：发什么文件、对方需准备什么 |
-| `docs\设计方案.md` | 需求、决策树、架构与实现要点 |
-| `过程记录\` | 进度日志，每次会话追加 `YYYY-MM-DD-主题.md` |
-| `产出\` | 本地构建产物（安装包/便携版，已 gitignore，发布走 GitHub Releases） |
-| `资料\` | 参考资料、素材 |
-| `app\` | Electron 壳源码 + 打包配置 |
+> 本仓库仅含**源码**；`产出\`、`资料\` 不在仓库内（见下表标注）。
+
+| 目录/文件 | 用途 | 是否入库 |
+|---|---|---|
+| `README.md` | 项目说明与构建指引 | ✅ |
+| `docs\设计方案.md` | 需求、决策树、架构与实现要点 | ✅ |
+| `docs\使用方法.md` | 成品使用说明（成品由构建生成，不在本仓库） | ✅ |
+| `docs\分发说明.md` | 成品分发说明（分发的是构建出的安装包） | ✅ |
+| `过程记录\` | 进度日志，每次会话追加 `YYYY-MM-DD-主题.md` | ✅ |
+| `app\` | Electron 壳源码 + 打包配置 | ✅ |
+| `产出\` | 构建产物（安装包/便携版），由 `app` 打包生成，发布走 GitHub Releases | ❌ 不入库 |
+| `资料\` | 本地参考资料、素材 | ❌ 不入库（当前为空） |
 
 ## 变更记录
 
