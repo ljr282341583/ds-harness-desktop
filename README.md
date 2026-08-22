@@ -7,12 +7,12 @@
 - 项目名称：DS Harness Desktop（ds-harness-desktop）
 - 创建日期：2026-08-14
 - 项目目标：为 DeepSeek Harness（`@deepseek-ai/dsh`，Node.js + Cordis 插件化 Agent Harness）提供一个桌面端形态。当前 DSH 以 `dsh web` 启动本地 Web 服务器（webserver + 前端静态资源 + apiproxy），在浏览器 `http://127.0.0.1:3080` 使用；桌面版目标是把这套能力装进原生窗口应用，保留完整工具链（bash/pwsh 终端、文件系统、subagent、workflow、goal 等）。
-- 当前状态：已完成（v0.1.0 交付：NSIS 安装器 + portable 便携版，含托盘/生命周期/Node 24 侧车/图标）
+- 当前状态：已完成（v0.1.1 交付：NSIS 安装器 + portable 便携版，含托盘/生命周期/Node 24 侧车/图标）
 - 验收标准：见 `docs\设计方案.md` 第 6 节（全部通过）
 
-## 下载（v0.1.0）
+## 下载（v0.1.1）
 
-编译好的成品发布在 [GitHub Releases](https://github.com/ljr282341583/ds-harness-desktop/releases/tag/v0.1.0)，二选一即可（内容相同，仅打包形态不同）：
+编译好的成品发布在 [GitHub Releases](https://github.com/ljr282341583/ds-harness-desktop/releases/tag/v0.1.1)，二选一即可（内容相同，仅打包形态不同）：
 
 | 版本 | 下载 | 说明 |
 |---|---|---|
