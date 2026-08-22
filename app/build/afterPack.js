@@ -42,6 +42,33 @@ exports.default = async function afterPack(context) {
     fs.cpSync(src, dest, { recursive: true, filter });
     const count = fs.readdirSync(path.join(dest, '@deepseek-ai')).length;
     console.log(`[afterPack] replaced node_modules, @deepseek-ai packages: ${count}`);
+
+    // ---- 依赖守卫：拒绝会把会话后端设成「不压缩」的 dsh-base 构建 ----
+    // 背景：@deepseek-ai/dsh-base 的 cordis.patch.yml 若含 `compression: none`，
+    // 打包后的 dsh 将无法读取 ~/.dsh/sessions 下既有的 .jsonl.zstd 会话，
+    // 表现为桌面版启动即闪退（dsh 子进程 exit code 1）。同版本号在不同
+    // registry/时点的 tarball 内容可能不同，这里在打包期硬校验，不兼容就 fail。
+    const dshBasePatch = path.join(dest, '@deepseek-ai', 'dsh-base', 'cordis.patch.yml');
+    if (fs.existsSync(dshBasePatch)) {
+      const patchText = fs.readFileSync(dshBasePatch, 'utf8');
+      if (/\bcompression:\s*none\b/.test(patchText)) {
+        throw new Error(
+          '[afterPack] 打包的 @deepseek-ai/dsh-base/cordis.patch.yml 包含 `compression: none`，' +
+          '会让桌面版无法读取现有 .jsonl.zstd 历史会话（启动即闪退）。' +
+          '请先用与 CLI 一致的 registry 执行 npm ci 重新安装依赖后再打包。'
+        );
+      }
+      const dshPkgPath = path.join(dest, '@deepseek-ai', 'dsh', 'package.json');
+      if (fs.existsSync(dshPkgPath)) {
+        const dshVersion = JSON.parse(fs.readFileSync(dshPkgPath, 'utf8')).version;
+        const appPkg = JSON.parse(fs.readFileSync(path.join(appDir, 'package.json'), 'utf8'));
+        const wanted = appPkg.dependencies && appPkg.dependencies['@deepseek-ai/dsh'];
+        console.log(`[afterPack] dsh guard: bundled @deepseek-ai/dsh=${dshVersion}, declared=${wanted}`);
+        if (typeof wanted === 'string' && wanted.startsWith('^')) {
+          console.warn(`[afterPack] 建议把 @deepseek-ai/dsh 依赖改为精确版本（去掉 ^），当前声明: ${wanted}`);
+        }
+      }
+    }
   }
 
   // ---- 2. rcedit 嵌图标 + 版本信息 ----

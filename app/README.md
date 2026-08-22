@@ -23,8 +23,12 @@ Electron 壳，包裹 `@deepseek-ai/dsh` 的 web profile。
 1. 安装依赖：
 
    ```sh
-   npm install
+   npm ci
    ```
+
+   > 必须用 `npm ci`（按 `package-lock.json` 精确安装）。`@deepseek-ai/*` 的
+   > RC 版本在不同 registry/时点的 tarball 内容可能不一致，本项目依赖
+   > 精确锁定 + 打包期守卫（见 `build/afterPack.js`），不满足会直接构建失败。
 
 2. 准备 Node 24 侧车（`runtime/` 不入库，需自行下载，用于运行 dsh）：
 

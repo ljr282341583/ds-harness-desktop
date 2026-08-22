@@ -25,7 +25,7 @@
 
 本仓库只含**源码**，不含编译好的安装包（`产出\`、`node_modules\`、`runtime\` 均不入库，需按下面步骤准备；也可直接从上方 Releases 下载成品）。
 
-1. 安装依赖：`cd app && npm install`
+1. 安装依赖：`cd app && npm ci`（按 lockfile 精确安装，勿用 `npm install`）
 2. 准备 Node 24 侧车（`app\runtime\`）：按 `app\README.md` 的「首次准备」下载
 3. 开发运行：`cd app && npm start`
 4. 打包安装包：`cd app && npm run build`（产物输出到 `产出\`）
@@ -55,3 +55,4 @@
 | 2026-08-14 | 完成访谈、搭壳、冒烟测试、打包（NSIS + portable）、补图标、写使用方法文档 |
 | 2026-08-15 | 修复数据污染：spawn dsh 显式指定 cwd；启动前探测 3080 已有实例则直接复用，杜绝双实例并发写 `~/.dsh` |
 | 2026-08-17 | 源码验证运行通过；补齐 Node 24 侧车并重新打包（NSIS + portable）；发布 v0.1.0 到 GitHub Releases |
+| 2026-08-22 | P0 修复：`@deepseek-ai/dsh` 改为精确版本并重新生成 lockfile；`afterPack` 增加依赖守卫（拒绝含 `compression: none` 的 dsh-base 构建，防止桌面端读不了 zstd 历史会话闪退）；安装依赖改用 `npm ci`。**待重新打包 NSIS + portable** |
