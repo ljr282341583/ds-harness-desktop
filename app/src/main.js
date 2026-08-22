@@ -242,7 +242,9 @@ async function startHarness() {
     /* ignore */
   }
 
-  const child = spawn(nodePath, [bin, 'web', '--port', String(dshPort)], {
+  // --no-open：dsh web 默认会用系统浏览器打开 UI，桌面版自己已有窗口，
+  // 不要再弹浏览器标签页。
+  const child = spawn(nodePath, [bin, 'web', '--port', String(dshPort), '--no-open'], {
     cwd,
     env: { ...process.env },
     stdio: childLogFd != null ? ['ignore', childLogFd, childLogFd] : 'ignore',
