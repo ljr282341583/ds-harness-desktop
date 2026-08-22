@@ -16,8 +16,8 @@
 
 | 版本 | 下载 | 说明 |
 |---|---|---|
-| 安装版 | [DS Harness Desktop Setup 0.1.1.exe](https://github.com/ljr282341583/ds-harness-desktop/releases/download/v0.1.1/DS%20Harness%20Desktop%20Setup%200.1.1.exe) | 向导安装，带开始菜单/桌面快捷方式/卸载入口 |
-| 便携版 | [DS Harness Desktop-0.1.1-portable.exe](https://github.com/ljr282341583/ds-harness-desktop/releases/download/v0.1.1/DS%20Harness%20Desktop-0.1.1-portable.exe) | 免安装单文件，双击即用，适合拷贝分发（每次启动需自解压约 2 分钟） |
+| 安装版 | [DS.Harness.Desktop.Setup.0.1.1.exe](https://github.com/ljr282341583/ds-harness-desktop/releases/download/v0.1.1/DS.Harness.Desktop.Setup.0.1.1.exe) | 向导安装，带开始菜单/桌面快捷方式/卸载入口 |
+| 便携版 | [DS.Harness.Desktop-0.1.1-portable.exe](https://github.com/ljr282341583/ds-harness-desktop/releases/download/v0.1.1/DS.Harness.Desktop-0.1.1-portable.exe) | 免安装单文件，双击即用，适合拷贝分发（每次启动需自解压约 2 分钟） |
 
 > 单文件已内置 Electron、Node 24 侧车、dsh 及全部依赖，**无需安装任何运行时**。首次使用在界面 Settings → Models 填自己的 DeepSeek API Key（复用本机 `~/.dsh`）；被 SmartScreen 拦截时点「更多信息 → 仍要运行」。
 
