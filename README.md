@@ -7,17 +7,17 @@
 - 项目名称：DS Harness Desktop（ds-harness-desktop）
 - 创建日期：2026-08-14
 - 项目目标：为 DeepSeek Harness（`@deepseek-ai/dsh`，Node.js + Cordis 插件化 Agent Harness）提供一个桌面端形态。当前 DSH 以 `dsh web` 启动本地 Web 服务器（webserver + 前端静态资源 + apiproxy），在浏览器 `http://127.0.0.1:3080` 使用；桌面版目标是把这套能力装进原生窗口应用，保留完整工具链（bash/pwsh 终端、文件系统、subagent、workflow、goal 等）。
-- 当前状态：已完成（v0.1.1 交付：NSIS 安装器 + portable 便携版，含托盘/生命周期/Node 24 侧车/图标）
+- 当前状态：已完成（v0.2.0 交付：NSIS 安装器 + portable 便携版，含托盘/生命周期/Node 24 侧车/图标；适配 dsh 0.1.5-rc.1 的 token 鉴权）
 - 验收标准：见 `docs\设计方案.md` 第 6 节（全部通过）
 
-## 下载（v0.1.1）
+## 下载（v0.2.0）
 
-编译好的成品发布在 [GitHub Releases](https://github.com/ljr282341583/ds-harness-desktop/releases/tag/v0.1.1)，二选一即可（内容相同，仅打包形态不同）：
+编译好的成品发布在 [GitHub Releases](https://github.com/ljr282341583/ds-harness-desktop/releases/tag/v0.2.0)，二选一即可（内容相同，仅打包形态不同）：
 
 | 版本 | 下载 | 说明 |
 |---|---|---|
-| 安装版 | [DS.Harness.Desktop.Setup.0.1.1.exe](https://github.com/ljr282341583/ds-harness-desktop/releases/download/v0.1.1/DS.Harness.Desktop.Setup.0.1.1.exe) | 向导安装，带开始菜单/桌面快捷方式/卸载入口 |
-| 便携版 | [DS.Harness.Desktop-0.1.1-portable.exe](https://github.com/ljr282341583/ds-harness-desktop/releases/download/v0.1.1/DS.Harness.Desktop-0.1.1-portable.exe) | 免安装单文件，双击即用，适合拷贝分发（每次启动需自解压约 2 分钟） |
+| 安装版 | [DS.Harness.Desktop.Setup.0.2.0.exe](https://github.com/ljr282341583/ds-harness-desktop/releases/download/v0.2.0/DS.Harness.Desktop.Setup.0.2.0.exe) | 向导安装，带开始菜单/桌面快捷方式/卸载入口 |
+| 便携版 | [DS.Harness.Desktop-0.2.0-portable.exe](https://github.com/ljr282341583/ds-harness-desktop/releases/download/v0.2.0/DS.Harness.Desktop-0.2.0-portable.exe) | 免安装单文件，双击即用，适合拷贝分发（每次启动需自解压约 2 分钟） |
 
 > 单文件已内置 Electron、Node 24 侧车、dsh 及全部依赖，**无需安装任何运行时**。首次使用在界面 Settings → Models 填自己的 DeepSeek API Key（复用本机 `~/.dsh`）；被 SmartScreen 拦截时点「更多信息 → 仍要运行」。
 
@@ -57,3 +57,4 @@
 | 2026-08-17 | 源码验证运行通过；补齐 Node 24 侧车并重新打包（NSIS + portable）；发布 v0.1.0 到 GitHub Releases |
 | 2026-08-22 | P0 修复：`@deepseek-ai/dsh` 改为精确版本并重新生成 lockfile；`afterPack` 增加依赖守卫（拒绝含 `compression: none` 的 dsh-base 构建，防止桌面端读不了 zstd 历史会话闪退）；安装依赖改用 `npm ci`。**待重新打包 NSIS + portable** |
 | 2026-08-23 | 发布 v0.1.1：包含 P0 依赖修复（闪退）+ 不再自动打开系统浏览器（`--no-open`） |
+| 2026-09-10 | 发布 v0.2.0：内置 dsh 升到 `0.1.5-rc.1`；主进程解析子进程输出的带 token 启动地址并据此加载（新版 Web UI 强制 token 鉴权）；复用已有实例时识别 401 并给出提示 |

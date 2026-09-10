@@ -7,7 +7,7 @@
  *       窗口加载本地 URL → 托盘（显示/重启/检查更新/退出）→ 生命周期管理。
  */
 
-const { app, BrowserWindow, Tray, Menu, nativeImage, shell, dialog, ipcMain } = require('electron');
+const { app, BrowserWindow, Tray, Menu, nativeImage, shell, dialog, ipcMain, session } = require('electron');
 const { spawn } = require('node:child_process');
 const { createServer } = require('node:net');
 const http = require('node:http');
@@ -26,6 +26,10 @@ let dshChild = null;
 let dshPort = DEFAULT_PORT;
 let quitting = false;
 let lastError = '';
+// dsh 0.1.5+ 的 Web UI 需要进程级 token：启动时它会把带 token 的地址打到 stdout，
+// 拿它加载一次即可换成签名 cookie，之后裸地址也能访问。
+let webLaunchUrl = null;
+let childOutBuffer = '';
 
 // 简单文件日志（GUI 应用无控制台，重定向又不可靠，写文件最稳）
 let _logFile = null;
@@ -200,27 +204,67 @@ function resolveCwd() {
 }
 
 /**
- * 探测某端口是否已有 DSH web 实例在跑。
+ * 探测某端口是否已有 DSH web 实例在跑，并区分「可复用」与「要求鉴权」。
  * 若已有（例如用户已开网页版），桌面版应直接复用而不是新开一个实例，
  * 否则两个实例会并发读写共享的 ~/.dsh，污染 workspace/会话索引。
+ *
+ * 用 Electron 会话发起请求（会带上本应用已获得的 dsh-auth cookie）：
+ *  - 200 等非 401 响应 → 'ok'，可复用
+ *  - 401 → 'auth-required'，该实例要 token，本应用没有可用 cookie，不能直接复用
+ *  - 连接失败 → null，端口空闲
  */
-function probeDsh(port, timeout = 2000) {
+async function probeExistingInstance(port, timeout = 2000) {
+  try {
+    const res = await session.defaultSession.fetch(`http://127.0.0.1:${port}/`, {
+      method: 'GET',
+      signal: AbortSignal.timeout(timeout),
+    });
+    if (res.status === 401) return 'auth-required';
+    return res.status < 500 ? 'ok' : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 从 dsh 子进程输出里解析带 token 的启动地址。 */
+function captureLaunchUrl(text) {
+  childOutBuffer = (childOutBuffer + text).slice(-16_384);
+  if (webLaunchUrl !== null) return;
+  const match = childOutBuffer.match(/https?:\/\/127\.0\.0\.1:\d+\/\?token=[A-Za-z0-9_-]+/);
+  if (match) {
+    webLaunchUrl = match[0];
+    log('captured token launch url');
+  }
+}
+
+/** 等待 dsh 打出带 token 的地址；子进程提前退出或超时则返回 null。 */
+function waitForLaunchUrl(timeout = READY_TIMEOUT_MS) {
+  const deadline = Date.now() + timeout;
   return new Promise((resolve) => {
-    const req = http.get({ host: '127.0.0.1', port, path: '/', timeout }, (res) => {
-      res.resume();
-      resolve(true);
-    });
-    req.on('error', () => resolve(false));
-    req.on('timeout', () => {
-      req.destroy();
-      resolve(false);
-    });
+    const tick = () => {
+      if (webLaunchUrl !== null) return resolve(webLaunchUrl);
+      if (quitting || dshChild === null) return resolve(null);
+      if (Date.now() > deadline) return resolve(null);
+      setTimeout(tick, 200);
+    };
+    tick();
   });
 }
 
 async function startHarness() {
   // 1) 默认端口已有 DSH 实例 → 直接复用，避免双实例并发写 ~/.dsh
-  if (await probeDsh(DEFAULT_PORT)) {
+  const existing = await probeExistingInstance(DEFAULT_PORT);
+  if (existing === 'auth-required') {
+    dshPort = DEFAULT_PORT;
+    log('existing instance requires token, will not reuse');
+    showErrorPage(
+      '端口 3080 上已有 DSH 实例在运行，但新版 harness 要求带 token 访问：' +
+      '请用它启动时打印的地址（形如 http://127.0.0.1:3080/?token=…）在浏览器打开，' +
+      '或先退出那个实例再启动桌面版。',
+    );
+    return;
+  }
+  if (existing === 'ok') {
     dshPort = DEFAULT_PORT;
     log('reusing existing dsh instance on port', dshPort);
     await mainWindow.loadURL(`http://127.0.0.1:${dshPort}/`);
@@ -231,6 +275,8 @@ async function startHarness() {
   const bin = dshBinPath();
   const nodePath = resolveNodePath();
   const cwd = resolveCwd();
+  webLaunchUrl = null;
+  childOutBuffer = '';
   log('startHarness: port=', dshPort, 'node=', nodePath, 'bin=', bin, 'cwd=', cwd);
 
   // dsh 子进程输出写到日志文件（GUI 应用无控制台，inherit 会弹出 cmd 窗口）
@@ -247,11 +293,26 @@ async function startHarness() {
   const child = spawn(nodePath, [bin, 'web', '--port', String(dshPort), '--no-open'], {
     cwd,
     env: { ...process.env },
-    stdio: childLogFd != null ? ['ignore', childLogFd, childLogFd] : 'ignore',
+    // stdout 要读（提取带 token 的启动地址），同时落盘到日志文件
+    stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true, // 关键：隐藏 dsh 子进程的控制台窗口
   });
   dshChild = child;
   log('spawned dsh pid=', child.pid);
+
+  const teeToLog = (chunk) => {
+    if (childLogFd == null) return;
+    try {
+      fs.writeSync(childLogFd, chunk);
+    } catch {
+      /* ignore */
+    }
+  };
+  child.stdout?.on('data', (chunk) => {
+    teeToLog(chunk);
+    captureLaunchUrl(chunk.toString('utf8'));
+  });
+  child.stderr?.on('data', teeToLog);
 
   child.on('exit', (code, signal) => {
     if (childLogFd != null) {
@@ -268,11 +329,20 @@ async function startHarness() {
     }
   });
 
+  const launchUrl = await waitForLaunchUrl();
+  log('waitForLaunchUrl result=', launchUrl === null ? 'null' : 'token-url');
+  if (launchUrl !== null) {
+    await mainWindow.loadURL(launchUrl);
+    log('loaded web UI (token)');
+    return;
+  }
+
+  // 兜底：老版本 dsh 不打 token 地址，退回「端口就绪即加载」
   const ready = await waitForReady(dshPort);
   log('waitForReady result=', ready);
   if (ready) {
     await mainWindow.loadURL(`http://127.0.0.1:${dshPort}/`);
-    log('loaded web UI');
+    log('loaded web UI (legacy)');
   } else if (!quitting) {
     showErrorPage('harness 服务未在预期时间内就绪');
   }
