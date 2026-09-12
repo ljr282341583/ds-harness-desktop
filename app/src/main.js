@@ -53,6 +53,8 @@ let overrideFallbackDone = false;
 const SHELL_RELEASES_URL = 'https://github.com/ljr282341583/ds-harness-desktop/releases/latest';
 let shellUpdateInProgress = false;
 let shellUpdateReady = null;
+// 记录当前 dsh 子进程的退出，供"干净停机"等待使用
+let dshExitPromise = null;
 
 // 简单文件日志（GUI 应用无控制台，重定向又不可靠，写文件最稳）
 // 日志只增不减会越积越大（dsh 出错时会打印几十 KB 的堆栈），因此做单份轮转：
@@ -438,6 +440,10 @@ async function startHarness() {
     windowsHide: true, // 关键：隐藏 dsh 子进程的控制台窗口
   });
   dshChild = child;
+  dshExitPromise = new Promise((resolve) => {
+    child.once('exit', () => resolve());
+    child.once('error', () => resolve());
+  });
   log('spawned dsh pid=', child.pid);
 
   const teeToLog = (chunk) => {
@@ -518,6 +524,23 @@ function stopHarness() {
     /* ignore */
   }
   dshChild = null;
+}
+
+/**
+ * 停止 dsh 子进程并等待它真正退出。
+ *
+ * 自动更新必须用这个：安装器一旦开跑就会删除/替换安装目录里的文件，
+ * 若此时 dsh 子进程（resources\runtime\node.exe）还活着，文件被占用会导致
+ * 「删了一半、装不回来」的残缺安装 —— v0.3.1 的自动更新就是这样把应用装坏的。
+ */
+function stopHarnessAndWait(timeoutMs = 8000) {
+  const exitPromise = dshExitPromise;
+  stopHarness();
+  if (exitPromise === null) return Promise.resolve(true);
+  return Promise.race([
+    exitPromise.then(() => true),
+    new Promise((resolve) => setTimeout(() => resolve(false), timeoutMs)),
+  ]);
 }
 
 // ---------------------------------------------------------------------------
@@ -845,10 +868,12 @@ function initShellUpdater() {
       debug: () => {},
     };
     // autoDownload=false：点「检查」只查不下载，下载需用户确认。
-    // autoInstallOnAppQuit=true：已下载的更新若用户没点「立即重启安装」，
-    // 会在退出应用时自动装上 —— 避免"下载了却一直没落地"这个常见困扰。
+    // autoInstallOnAppQuit=false：不在「退出应用」时静默安装。退出路径里我们无法
+    //   等待 dsh 子进程完全退出，安装器会和它抢安装目录里的文件，导致残缺安装
+    //   （v0.3.1 的自动更新就是这样把应用装坏的）。安装只在用户点托盘
+    //   「重启并安装」时进行 —— 那时会先做干净停机再交给安装器。
     autoUpdater.autoDownload = false;
-    autoUpdater.autoInstallOnAppQuit = true;
+    autoUpdater.autoInstallOnAppQuit = false;
 
     autoUpdater.on('download-progress', (progress) => {
       const percent = Math.round(progress.percent || 0);
@@ -974,7 +999,7 @@ async function checkShellUpdate(options = {}) {
         message: `发现桌面端新版本 v${info.version}`,
         detail:
           `当前版本：v${app.getVersion()}\n目标版本：v${info.version}\n\n` +
-          '下载完成后可立即重启安装；选择「稍后」则会在退出应用时自动装上。\n' +
+          '下载完成后可立即重启安装；选择「稍后」则暂不安装，之后可从托盘的「重启并安装」再装。\n' +
           'dsh 的会话与凭据存放在 ~/.dsh，不受影响。',
       });
       if (response !== 0) return { ok: false, status: 'cancelled', message: '已取消下载' };
@@ -1003,17 +1028,20 @@ async function installShellUpdate() {
   const info = shellUpdateReady;
   const { response } = await dialog.showMessageBox(mainWindow, {
     type: 'question',
-    buttons: ['立即重启并安装', '稍后（退出应用时自动安装）'],
+    buttons: ['立即重启并安装', '稍后'],
     defaultId: 0,
     cancelId: 1,
     title: '安装桌面端更新',
     message: `安装 v${info.version} 并重启应用`,
     detail: '将先停止本地 dsh 服务再安装，安装完成后应用会自动重新启动。',
   });
-  if (response !== 0) return { ok: false, status: 'postponed', message: '已暂缓，可稍后从托盘安装' };
+  if (response !== 0) return { ok: false, status: 'postponed', message: '已暂缓；之后可从托盘「重启并安装」再装' };
   log('[shell-update] quitAndInstall v' + info.version);
   quitting = true;
-  stopHarness();
-  setImmediate(() => autoUpdater.quitAndInstall());
+  // 关键顺序：先等 dsh 子进程真正退出，再让安装器接管安装目录
+  const exited = await stopHarnessAndWait();
+  log('[shell-update] dsh 子进程已退出 =', exited, '，交给安装器');
+  // 再留一点时间让 Electron 释放文件句柄，避免与安装器抢文件
+  setTimeout(() => autoUpdater.quitAndInstall(), 1500);
   return { ok: true, status: 'installing', message: `正在安装 v${info.version}` };
 }

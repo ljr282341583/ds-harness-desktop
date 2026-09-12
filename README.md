@@ -21,8 +21,8 @@
 
 | 版本 | 下载 | 说明 |
 |---|---|---|
-| 安装版（推荐） | [DS-Harness-Desktop-Setup-0.3.1.exe](https://github.com/ljr282341583/ds-harness-desktop/releases/download/v0.3.1/DS-Harness-Desktop-Setup-0.3.1.exe) | 向导安装，带开始菜单 / 桌面快捷方式 / 卸载入口；**支持托盘一键自更新** |
-| 便携版 | [DS-Harness-Desktop-0.3.1-portable.exe](https://github.com/ljr282341583/ds-harness-desktop/releases/download/v0.3.1/DS-Harness-Desktop-0.3.1-portable.exe) | 免安装单文件，双击即用，适合拷贝分发；每次启动需自解压，且**无法原地自更新**（会引导手动下载新文件） |
+| 安装版（推荐） | [DS-Harness-Desktop-Setup-0.3.2.exe](https://github.com/ljr282341583/ds-harness-desktop/releases/download/v0.3.2/DS-Harness-Desktop-Setup-0.3.2.exe) | 静默一键安装，带开始菜单 / 桌面快捷方式 / 卸载入口；**支持托盘一键自更新** |
+| 便携版 | [DS-Harness-Desktop-0.3.2-portable.exe](https://github.com/ljr282341583/ds-harness-desktop/releases/download/v0.3.2/DS-Harness-Desktop-0.3.2-portable.exe) | 免安装单文件，双击即用，适合拷贝分发；每次启动需自解压，且**无法原地自更新**（会引导手动下载新文件） |
 
 > 想找历史版本或全部资产（含 `latest.yml`），见 [Releases 列表](https://github.com/ljr282341583/ds-harness-desktop/releases)。
 
@@ -73,8 +73,8 @@
   若新版本装了却启动不起来，程序会自动回退到内置版本并重启一次。
 - **不影响你的数据**：更新只写入应用自己的数据目录，不触碰 `~/.dsh` 里的密钥、会话、skills 与 profiles。
 - **磁盘占用**：只保留当前版本与上一个可用版本，其余自动清理。
-- **「稍后」的含义**：桌面端更新下载完后如果选「稍后（退出应用时自动安装）」，
-  下次退出应用时会自动装上，不会一直悬着没落地。
+- **「稍后」的含义**：桌面端更新下载完后如果选「稍后」，会暂不安装；托盘里会出现
+  「重启并安装 vX」，想装的时候点它（安装前会先干净停掉 dsh 服务）。
 - **便携版差异**：便携版每次启动都会自解压到临时目录，无法在原地替换自己，因此「检查桌面端更新」会引导你从发布页下载新的便携版文件；dsh 本体更新在两种形态上都能用。
 
 ### 常见问题
@@ -85,6 +85,7 @@
 | 显示「服务不可用」 | 先点错误页的「重启服务」；若反复出现，多半是 `~/.dsh/profiles` 里的第三方插件与当前 dsh 版本不兼容（dsh 启动会直接退出）。可查看 `%APPDATA%\ds-harness-desktop\dsh-child.log`，日志里会指明是哪个插件；临时办法是先在 profile 里移除该插件 |
 | 检查更新提示已是最新 | `stable` 通道跟官方 `latest` 标签，官方未提升该标签时就显示已是最新；想尝鲜可切到 `preview` |
 | 更新下载很慢 | 安装包约 213 MB，且需访问 GitHub；网络受限时可能超时 |
+| **更新后应用打不开** | 从 [Releases](https://github.com/ljr282341583/ds-harness-desktop/releases/latest) 重新下载最新安装包再装一次即可修复（只覆盖程序文件，不会动 `~/.dsh` 里的会话与密钥）。v0.3.1 的自动更新曾出现装坏的情况，v0.3.2 已修 |
 | 窗口关了找不到 | 它在托盘里，单击托盘图标唤回 |
 
 ## 从源码构建
@@ -155,3 +156,4 @@ GitHub Actions（`.github/workflows/release.yml`）会同步版本号、安装�
 | 2026-09-12 | 仓库转为公开：客户端可匿名拉取 Release 与更新清单（公开前已扫描提交历史与工作区，未发现密钥/令牌） |
 | 2026-09-12 | 修复发布形态：`publish` 段显式指定 `releaseType: release`，避免 electron-builder 默认把 Release 建成草稿（草稿对客户端不可见，会导致「检查桌面端更新」永远拉不到新版本） |
 | 2026-09-13 | 发布 v0.3.1：日志按大小轮转（上限 5 MB，保留 `.1` 备份），避免长期运行把日志撑满磁盘；冒烟验证不再把调用方的完整环境变量交给新下载的包，改为最小环境白名单；明确「稍后」= 退出应用时自动安装；CI 增加「写入 Release 说明」（取 tag 注释），修掉此前 Release 正文为空的退化 |
+| 2026-09-13 | 发布 v0.3.2：**修复自动更新会把应用装坏**的问题 —— 安装器启动前先等 dsh 子进程真正退出（此前安装器与正在退出的进程抢安装目录里的文件，导致「删了旧文件没装回新文件」）；改用 oneClick 静默安装（向导式 + 自选安装目录在 electron-updater 的 `--updated` 流程下不可靠）；不再在退出应用时静默安装，安装只在用户确认时进行；补「更新后打不开」的恢复说明 |

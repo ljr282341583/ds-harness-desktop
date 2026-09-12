@@ -50,9 +50,12 @@ win:
   signAndEditExecutable: false
 
 nsis:
-  oneClick: false
+  # oneClick 静默安装：自动更新走这条标准路径最稳。
+  # 之前用 oneClick:false（向导式、可选安装目录）时，electron-updater 的
+  # `--updated /S` 更新流程出现过"删了旧文件却没装回新文件"的残缺安装
+  # （v0.3.1 实测踩到）。代价：用户不能再自选安装目录。
+  oneClick: true
   perMachine: false
-  allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
   shortcutName: DS Harness Desktop
