@@ -1,0 +1,61 @@
+name: 发布桌面端
+
+# 打 tag（v0.3.0 形式）即自动打包并发布；也可手动触发。
+# 发布产物：NSIS 安装器、portable 便携版、latest.yml（外壳自更新清单）。
+#
+# 说明：日常的 dsh 版本升级不需要发新外壳 —— 桌面端内置的「检查 dsh 更新」
+# 会在运行时直接更新 dsh 本体。只有外壳自身变更（或上游启动契约破坏）才需要发版。
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 准备 Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      # 必须在 npm ci 之前同步版本号：npm ci 要求 package.json 与 lock 的版本一致
+      - name: 同步版本号（tag → package.json / lock）
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          node -e "const fs=require('fs');for (const f of ['app/package.json','app/package-lock.json']) { const j=JSON.parse(fs.readFileSync(f,'utf8')); j.version=process.argv[1]; if (j.packages && j.packages['']) j.packages[''].version=process.argv[1]; fs.writeFileSync(f, JSON.stringify(j,null,2)+'\n'); }" $version
+          Write-Host "版本号已设为 $version"
+
+      - name: 安装依赖（npm ci）
+        working-directory: app
+        env:
+          # npm 11 起 .npmrc 的 electron_mirror 不再传给安装脚本，用环境变量指定镜像
+          ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+        run: npm ci
+
+      - name: 准备侧车运行时（Node 24 + 捆绑 npm）
+        working-directory: app
+        shell: pwsh
+        run: ./scripts/prepare-runtime.ps1
+
+      - name: 更新器单元测试
+        working-directory: app
+        run: npm test
+
+      - name: 打包并发布到 GitHub Releases
+        working-directory: app
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --win --publish always

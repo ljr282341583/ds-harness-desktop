@@ -24,6 +24,14 @@ files:
 # 因此必须关闭 asar，让 dsh 及其依赖以普通文件落盘，侧车才能直接读取。
 asar: false
 
+# 外壳自更新（electron-updater）的发布源。
+# 打包时会生成 latest.yml 并写入 resources/app-update.yml，客户端据此匿名拉取更新。
+# 仓库必须是公开仓库，否则客户端拿不到清单与安装包。
+publish:
+  provider: github
+  owner: ljr282341583
+  repo: ds-harness-desktop
+
 # 把独立 Node 运行时复制到 resources/runtime，供主进程 spawn dsh
 extraResources:
   - from: runtime

@@ -14,11 +14,16 @@ const http = require('node:http');
 const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
+const updater = require('./updater.js');
+const { autoUpdater } = require('electron-updater');
 
 const DEFAULT_PORT = 3080;
 const MAX_PORT_TRIES = 10;
 const READY_TIMEOUT_MS = 30_000;
 const READY_POLL_MS = 250;
+// 等待 dsh 打印带 token 地址的上限。首次启动或刚换到新版本时，
+// dsh 需要初始化 profile（实测冷启动可达 60 秒以上），因此这里明显长于就绪探测超时。
+const TOKEN_WAIT_TIMEOUT_MS = 120_000;
 
 let mainWindow = null;
 let tray = null;
@@ -30,6 +35,24 @@ let lastError = '';
 // 拿它加载一次即可换成签名 cookie，之后裸地址也能访问。
 let webLaunchUrl = null;
 let childOutBuffer = '';
+// 是否已经结束「等待 token 地址」；用于识别「迟到一步」的 token 地址并补救
+let tokenWaitSettled = false;
+
+// 应用内热更新的安装根：放在用户数据目录，NSIS 安装版与 portable 便携版通用，重装不丢。
+// 惰性取值：app.getPath 在主进程 ready 之前调用不被官方保证。
+let _updateBaseDir = null;
+function updateBaseDir() {
+  if (_updateBaseDir === null) _updateBaseDir = path.join(app.getPath('userData'), 'dsh-update');
+  return _updateBaseDir;
+}
+let updateInProgress = false;
+// 覆盖版本启动失败时只自动回退一次，避免回退失败后无限重启
+let overrideFallbackDone = false;
+
+// 外壳（桌面端自身）更新状态
+const SHELL_RELEASES_URL = 'https://github.com/ljr282341583/ds-harness-desktop/releases/latest';
+let shellUpdateInProgress = false;
+let shellUpdateReady = null;
 
 // 简单文件日志（GUI 应用无控制台，重定向又不可靠，写文件最稳）
 let _logFile = null;
@@ -77,6 +100,18 @@ app.on('will-quit', () => {
 // ---------------------------------------------------------------------------
 async function bootstrap() {
   log('bootstrap start, userData=', app.getPath('userData'));
+
+  // 覆盖版本目录缺失或损坏时清理状态，避免用坏路径启动（内置版本是保底）
+  try {
+    const overrideState = updater.readState(updateBaseDir());
+    if (overrideState.activeVersion && !updater.resolveActiveRoot(updateBaseDir())) {
+      log('active override unusable, falling back to bundled:', overrideState.activeVersion);
+      updater.deactivate(updateBaseDir());
+    }
+  } catch (error) {
+    log('override state check failed:', error.message);
+  }
+
   ipcMain.handle('dsh:get-port', () => dshPort);
   ipcMain.handle('dsh:get-error', () => lastError);
   ipcMain.handle('dsh:restart', async () => {
@@ -85,6 +120,17 @@ async function bootstrap() {
     await startHarness();
     return dshPort;
   });
+  ipcMain.handle('dsh:get-versions', () => describeVersions());
+  ipcMain.handle('dsh:update-check', async () => performUpdate({ silent: true }));
+  ipcMain.handle('dsh:update-channel', async (_event, channel) => {
+    setUpdateChannel(channel);
+    return describeVersions();
+  });
+  ipcMain.handle('dsh:update-rollback', async () => rollbackToBundled());
+  ipcMain.handle('dsh:shell-update-check', async () => checkShellUpdate({ silent: true }));
+  ipcMain.handle('dsh:shell-update-install', async () => installShellUpdate());
+
+  initShellUpdater();
 
   createWindow();
   log('window created');
@@ -172,8 +218,61 @@ async function findFreePort(start) {
 // harness 子进程
 // ---------------------------------------------------------------------------
 function dshBinPath() {
+  // 优先使用应用内更新下载的版本；没有则回退到随安装包捆绑的内置版本
+  const overrideRoot = updater.resolveActiveRoot(updateBaseDir());
+  if (overrideRoot) {
+    return path.join(overrideRoot, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js');
+  }
   const dshRoot = path.dirname(require.resolve('@deepseek-ai/dsh/package.json'));
   return path.join(dshRoot, 'lib', 'bin.js');
+}
+
+/** 随安装包捆绑的 dsh 版本（保底版本）。 */
+function bundledDshVersion() {
+  try {
+    const dshRoot = path.dirname(require.resolve('@deepseek-ai/dsh/package.json'));
+    return updater.readPackageVersion(dshRoot);
+  } catch {
+    return null;
+  }
+}
+
+/** 当前实际生效的 dsh 版本：有覆盖版本则用覆盖版本，否则是内置版本。 */
+function currentDshVersion() {
+  const state = updater.readState(updateBaseDir());
+  return state.activeVersion || bundledDshVersion();
+}
+
+/** 供界面与托盘使用的版本/通道快照。 */
+function describeVersions() {
+  const state = updater.readState(updateBaseDir());
+  return {
+    shell: app.getVersion(),
+    dsh: currentDshVersion(),
+    dshSource: state.activeVersion ? 'updated' : 'bundled',
+    bundledDsh: bundledDshVersion(),
+    activeVersion: state.activeVersion,
+    previousVersion: state.previousVersion,
+    lastResult: state.lastResult,
+    channel: state.channel,
+    updateBaseDir: updateBaseDir(),
+    updateInProgress,
+  };
+}
+
+/**
+ * 定位用于执行安装的 npm CLI。
+ * 打包时需把 npm 一并放进侧车运行时（见 app/README.md「准备 Node 24 侧车」）；
+ * 开发态回退到本机 Node 自带 npm。
+ */
+function resolveNpmCliPath() {
+  const candidates = [
+    process.env.DSH_DESKTOP_NPM_CLI,
+    path.join(path.dirname(resolveNodePath()), 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    path.join(process.resourcesPath || '', 'runtime', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    path.join(__dirname, '..', 'runtime', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+  ].filter((candidate) => candidate && fs.existsSync(candidate));
+  return candidates.length > 0 ? candidates[0] : null;
 }
 
 /**
@@ -234,6 +333,12 @@ function captureLaunchUrl(text) {
   if (match) {
     webLaunchUrl = match[0];
     log('captured token launch url');
+    // 冷启动时 dsh 可能晚于等待超时才打印 token 地址。此时窗口很可能已经按兜底逻辑
+    // 加载了裸地址，而新版 Web UI 对裸地址返回 401 —— 必须改用带 token 的地址重载。
+    if (tokenWaitSettled && !quitting && dshChild !== null && mainWindow) {
+      log('late token url → reloading with token');
+      mainWindow.loadURL(webLaunchUrl).catch((error) => log('late token reload failed:', error.message));
+    }
   }
 }
 
@@ -277,6 +382,7 @@ async function startHarness() {
   const cwd = resolveCwd();
   webLaunchUrl = null;
   childOutBuffer = '';
+  tokenWaitSettled = false;
   log('startHarness: port=', dshPort, 'node=', nodePath, 'bin=', bin, 'cwd=', cwd);
 
   // dsh 子进程输出写到日志文件（GUI 应用无控制台，inherit 会弹出 cmd 窗口）
@@ -324,14 +430,25 @@ async function startHarness() {
     }
     dshChild = null;
     log('dsh child exited: code=', code, 'signal=', signal, 'quitting=', quitting);
-    if (!quitting) {
-      showErrorPage(`harness 子进程已退出（code=${code}，signal=${signal}）`);
+    if (quitting) return;
+    // 覆盖版本启动失败 → 自动回退到内置版本并重启一次（内置版本是保底），
+    // 只回退一次，避免回退后仍失败时无限重启。
+    const overrideState = updater.readState(updateBaseDir());
+    if (overrideState.activeVersion && !overrideFallbackDone) {
+      overrideFallbackDone = true;
+      log('[updater] 覆盖版本启动失败，回退内置版本：', overrideState.activeVersion);
+      updater.deactivate(updateBaseDir());
+      startHarness().catch((error) => log('fallback restart failed:', error.message));
+      return;
     }
+    showErrorPage(`harness 子进程已退出（code=${code}，signal=${signal}）`);
   });
 
-  const launchUrl = await waitForLaunchUrl();
+  const launchUrl = await waitForLaunchUrl(TOKEN_WAIT_TIMEOUT_MS);
+  tokenWaitSettled = true;
   log('waitForLaunchUrl result=', launchUrl === null ? 'null' : 'token-url');
   if (launchUrl !== null) {
+    overrideFallbackDone = false;
     await mainWindow.loadURL(launchUrl);
     log('loaded web UI (token)');
     return;
@@ -341,6 +458,7 @@ async function startHarness() {
   const ready = await waitForReady(dshPort);
   log('waitForReady result=', ready);
   if (ready) {
+    overrideFallbackDone = false;
     await mainWindow.loadURL(`http://127.0.0.1:${dshPort}/`);
     log('loaded web UI (legacy)');
   } else if (!quitting) {
@@ -411,7 +529,17 @@ function createTray() {
   }
 
   tray = new Tray(icon);
-  tray.setToolTip('DS Harness Desktop');
+  refreshTrayMenu();
+  tray.on('click', showWindow);
+  tray.on('double-click', showWindow);
+}
+
+/** 重建托盘菜单与提示语（版本、通道、更新状态变化后调用）。 */
+function refreshTrayMenu() {
+  if (!tray) return;
+  const info = describeVersions();
+  const sourceLabel = info.dshSource === 'updated' ? '已更新' : '内置';
+  tray.setToolTip(`DS Harness Desktop — dsh v${info.dsh}（${sourceLabel}）`);
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: '显示窗口', click: showWindow },
@@ -424,14 +552,53 @@ function createTray() {
       },
       { type: 'separator' },
       {
-        label: '检查更新',
+        label: `桌面端 v${info.shell} ｜ dsh v${info.dsh}（${sourceLabel}）`,
+        enabled: false,
+      },
+      {
+        label: updateInProgress ? '正在更新 dsh…' : '检查 dsh 更新',
+        enabled: !updateInProgress,
         click: () => {
-          dialog.showMessageBox(mainWindow, {
-            type: 'info',
-            title: '检查更新',
-            message: '当前版本 0.1.0',
-            detail: '自动更新将在后续版本提供，届时可在此处一键升级。',
-          });
+          performUpdate({ silent: false }).catch((error) => log('[updater] 未处理异常：', error.message));
+        },
+      },
+      {
+        label: '更新通道',
+        submenu: [
+          {
+            label: '官方推荐（stable → latest）',
+            type: 'radio',
+            checked: info.channel === 'stable',
+            click: () => setUpdateChannel('stable'),
+          },
+          {
+            label: '尝鲜（preview → next）',
+            type: 'radio',
+            checked: info.channel === 'preview',
+            click: () => setUpdateChannel('preview'),
+          },
+        ],
+      },
+      {
+        label: shellUpdateReady ? `重启并安装 v${shellUpdateReady.version}` : '检查桌面端更新',
+        enabled: !shellUpdateInProgress && !updateInProgress,
+        click: () => {
+          const task = shellUpdateReady ? installShellUpdate() : checkShellUpdate({ silent: false });
+          task.catch((error) => log('[shell-update] 未处理异常：', error.message));
+        },
+      },
+      {
+        label: '回到内置版本',
+        enabled: Boolean(info.activeVersion) && !updateInProgress,
+        click: () => {
+          rollbackToBundledInteractive().catch((error) => log('[updater] 回退异常：', error.message));
+        },
+      },
+      { type: 'separator' },
+      {
+        label: '打开数据目录',
+        click: () => {
+          shell.openPath(app.getPath('userData'));
         },
       },
       { type: 'separator' },
@@ -444,6 +611,372 @@ function createTray() {
       },
     ]),
   );
-  tray.on('click', showWindow);
-  tray.on('double-click', showWindow);
+}
+
+// ---------------------------------------------------------------------------
+// 应用内 dsh 更新
+// ---------------------------------------------------------------------------
+
+function setUpdateChannel(channel) {
+  const next = channel === 'preview' ? 'preview' : 'stable';
+  updater.writeState(updateBaseDir(), { channel: next });
+  log('[updater] 更新通道 →', next);
+  refreshTrayMenu();
+  return next;
+}
+
+function setBusyIndicator(busy, text) {
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.setProgressBar(busy ? 2 : -1);
+  } catch {
+    /* ignore */
+  }
+  if (busy && text) tray?.setToolTip(`DS Harness Desktop — ${text}`);
+}
+
+/**
+ * 执行一次完整更新：检查 → 下载安装 → 兼容守卫 → 冒烟验证 → 激活 → 重启服务。
+ * silent=true 时不弹任何对话框（供 IPC 调用方自行决定呈现方式）。
+ */
+async function performUpdate(options = {}) {
+  const silent = options.silent === true;
+  if (updateInProgress) {
+    const busy = { ok: false, status: 'busy', message: '已有更新任务正在进行中' };
+    if (!silent) await dialog.showMessageBox(mainWindow, { type: 'info', title: '检查更新', message: busy.message });
+    return busy;
+  }
+
+  const state = updater.readState(updateBaseDir());
+  const current = currentDshVersion();
+  const npmCliPath = resolveNpmCliPath();
+
+  updateInProgress = true;
+  setBusyIndicator(true, '正在更新 dsh…');
+  refreshTrayMenu();
+  try {
+    const check = await updater.checkForUpdate({ currentVersion: current, channel: state.channel });
+    if (!check.target) {
+      const result = { ok: false, status: 'error', check, message: '无法从注册表解析目标版本，请检查网络后重试' };
+      if (!silent) await dialog.showMessageBox(mainWindow, { type: 'warning', title: '检查更新', message: '检查失败', detail: result.message });
+      return result;
+    }
+    if (!check.hasUpdate) {
+      const message = check.isDowngrade
+        ? `当前 v${current} 高于 ${check.tag} 通道的 v${check.target}（官方可能已撤回该版本）`
+        : `已是最新版本 v${current}`;
+      if (!silent) {
+        await dialog.showMessageBox(mainWindow, {
+          type: 'info',
+          title: '检查更新',
+          message,
+          detail: `更新通道：${state.channel === 'preview' ? 'preview（next）' : 'stable（latest）'}`,
+        });
+      }
+      return { ok: true, status: check.isDowngrade ? 'downgrade-available' : 'up-to-date', check, message };
+    }
+    if (!npmCliPath) {
+      const result = {
+        ok: false,
+        status: 'error',
+        check,
+        message: '当前构建未捆绑 npm，无法在应用内安装新版本。请使用含更新能力的桌面端版本。',
+      };
+      if (!silent) await dialog.showMessageBox(mainWindow, { type: 'warning', title: '检查更新', message: '无法应用更新', detail: result.message });
+      return result;
+    }
+
+    if (!silent) {
+      const { response } = await dialog.showMessageBox(mainWindow, {
+        type: 'question',
+        buttons: ['立即更新', '取消'],
+        defaultId: 0,
+        cancelId: 1,
+        title: '发现新版本',
+        message: `发现 dsh 新版本 v${check.target}`,
+        detail:
+          `当前版本：v${current}\n目标版本：v${check.target}（${check.tag} 通道）\n` +
+          `发布时间：${check.publishedAt ? new Date(check.publishedAt).toLocaleString() : '未知'}\n\n` +
+          '更新会下载到用户数据目录，经启动冒烟验证通过后才启用；失败会自动保留当前版本，' +
+          '不会影响 ~/.dsh 中的会话与凭据。下载安装可能需要 1–3 分钟。',
+      });
+      if (response !== 0) return { ok: false, status: 'cancelled', check, message: '已取消更新' };
+    }
+
+    const result = await updater.updateToLatest({
+      baseDir: updateBaseDir(),
+      nodePath: resolveNodePath(),
+      npmCliPath,
+      currentVersion: current,
+      channel: state.channel,
+      cwd: resolveCwd(),
+      log: (...args) => log('[updater]', ...args),
+      onProgress: (message) => {
+        log('[updater]', message);
+        tray?.setToolTip(`DS Harness Desktop — ${message}`);
+      },
+    });
+
+    if (result.status === 'updated') {
+      log('[updater] 激活 v' + result.install.version + '，重启服务');
+      stopHarness();
+      overrideFallbackDone = false;
+      await startHarness();
+      if (!silent) {
+        await dialog.showMessageBox(mainWindow, {
+          type: 'info',
+          title: '更新完成',
+          message: result.message,
+          detail: `桌面端 v${app.getVersion()} ｜ dsh v${result.install.version}`,
+        });
+      }
+      return { ok: true, ...result };
+    }
+
+    if (!silent) {
+      await dialog.showMessageBox(mainWindow, {
+        type: result.status === 'error' ? 'warning' : 'info',
+        title: '检查更新',
+        message: result.message,
+      });
+    }
+    return { ok: false, ...result };
+  } catch (error) {
+    const message = String((error && error.message) || error);
+    log('[updater] 更新失败：', message);
+    if (!silent) {
+      await dialog.showMessageBox(mainWindow, { type: 'warning', title: '更新失败', message: '应用内更新未完成', detail: message });
+    }
+    return { ok: false, status: 'error', message };
+  } finally {
+    updateInProgress = false;
+    setBusyIndicator(false);
+    refreshTrayMenu();
+  }
+}
+
+async function rollbackToBundled() {
+  const state = updater.readState(updateBaseDir());
+  if (!state.activeVersion) {
+    return { ok: false, status: 'already-bundled', message: `当前已在运行内置版本 v${bundledDshVersion()}` };
+  }
+  updater.deactivate(updateBaseDir());
+  log('[updater] 回退到内置版本 v' + bundledDshVersion());
+  stopHarness();
+  overrideFallbackDone = false;
+  await startHarness();
+  refreshTrayMenu();
+  return { ok: true, status: 'rolled-back', message: `已回到内置版本 v${bundledDshVersion()}` };
+}
+
+async function rollbackToBundledInteractive() {
+  const state = updater.readState(updateBaseDir());
+  if (!state.activeVersion) {
+    await dialog.showMessageBox(mainWindow, {
+      type: 'info',
+      title: '回到内置版本',
+      message: `当前已在运行内置版本 v${bundledDshVersion()}`,
+    });
+    return;
+  }
+  const { response } = await dialog.showMessageBox(mainWindow, {
+    type: 'question',
+    buttons: ['回到内置版本', '取消'],
+    defaultId: 0,
+    cancelId: 1,
+    title: '回到内置版本',
+    message: `当前使用 App 内更新的 dsh v${state.activeVersion}`,
+    detail: `将停止服务并切回内置的 v${bundledDshVersion()}。已下载的版本目录会保留，可再次更新；` +
+      '不会影响 ~/.dsh 中的会话与凭据。',
+  });
+  if (response !== 0) return;
+  const result = await rollbackToBundled();
+  await dialog.showMessageBox(mainWindow, { type: 'info', title: '回到内置版本', message: result.message });
+}
+
+// ---------------------------------------------------------------------------
+// 外壳（桌面端自身）更新 —— electron-updater
+// ---------------------------------------------------------------------------
+
+/** electron-builder 的 portable 目标会注入 PORTABLE_EXECUTABLE_DIR。 */
+function isPortableBuild() {
+  return Boolean(process.env.PORTABLE_EXECUTABLE_DIR || process.env.PORTABLE_EXECUTABLE_FILE);
+}
+
+function initShellUpdater() {
+  try {
+    autoUpdater.logger = {
+      info: (...args) => log('[shell-update]', ...args),
+      warn: (...args) => log('[shell-update][warn]', ...args),
+      error: (...args) => log('[shell-update][error]', ...args),
+      debug: () => {},
+    };
+    // 下载与安装都交给用户确认：autoDownload=false 让「检查」只查不下载
+    autoUpdater.autoDownload = false;
+    autoUpdater.autoInstallOnAppQuit = true;
+
+    autoUpdater.on('download-progress', (progress) => {
+      const percent = Math.round(progress.percent || 0);
+      tray?.setToolTip(`DS Harness Desktop — 正在下载桌面端更新 ${percent}%`);
+      try {
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.setProgressBar((progress.percent || 0) / 100);
+      } catch {
+        /* ignore */
+      }
+    });
+    autoUpdater.on('update-downloaded', (info) => {
+      shellUpdateReady = info;
+      shellUpdateInProgress = false;
+      setBusyIndicator(false);
+      refreshTrayMenu();
+      log('[shell-update] 下载完成 v' + info.version);
+    });
+    autoUpdater.on('error', (error) => {
+      shellUpdateInProgress = false;
+      setBusyIndicator(false);
+      refreshTrayMenu();
+      log('[shell-update][error]', error == null ? 'unknown' : error.message || String(error));
+    });
+  } catch (error) {
+    log('[shell-update] 初始化失败：', error.message);
+  }
+}
+
+/** 等待一次检查结束；以事件为准，避免依赖 checkForUpdates 的返回结构差异。 */
+function checkShellUpdateOnce(timeoutMs = 30_000) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(value);
+    };
+    function cleanup() {
+      clearTimeout(timer);
+      autoUpdater.removeListener('update-available', onAvailable);
+      autoUpdater.removeListener('update-not-available', onNone);
+      autoUpdater.removeListener('error', onError);
+    }
+    const onAvailable = (info) => finish({ status: 'available', info });
+    const onNone = (info) => finish({ status: 'none', info });
+    const onError = (error) => finish({ status: 'error', message: (error && error.message) || String(error) });
+    const timer = setTimeout(() => finish({ status: 'error', message: '检查超时（网络不可达？）' }), timeoutMs);
+
+    autoUpdater.once('update-available', onAvailable);
+    autoUpdater.once('update-not-available', onNone);
+    autoUpdater.once('error', onError);
+    Promise.resolve(autoUpdater.checkForUpdates()).catch((error) => onError(error));
+  });
+}
+
+/**
+ * 检查桌面端外壳更新。
+ * 便携版无法原地自更新（每次启动都自解压到临时目录），改为引导到发布页手动下载。
+ */
+async function checkShellUpdate(options = {}) {
+  const silent = options.silent === true;
+  if (shellUpdateInProgress) {
+    const busy = { ok: false, status: 'busy', message: '桌面端更新任务正在进行中' };
+    if (!silent) await dialog.showMessageBox(mainWindow, { type: 'info', title: '桌面端更新', message: busy.message });
+    return busy;
+  }
+  if (!app.isPackaged) {
+    const message = '开发态不检查桌面端更新（electron-updater 只在安装版/便携版中生效）';
+    if (!silent) await dialog.showMessageBox(mainWindow, { type: 'info', title: '桌面端更新', message });
+    return { ok: false, status: 'dev-mode', message };
+  }
+  if (isPortableBuild()) {
+    if (!silent) {
+      const { response } = await dialog.showMessageBox(mainWindow, {
+        type: 'info',
+        buttons: ['打开发布页', '取消'],
+        defaultId: 0,
+        cancelId: 1,
+        title: '桌面端更新',
+        message: '便携版需要手动更新',
+        detail:
+          '便携版每次启动都会自解压到临时目录，无法在原地替换正在运行的程序。\n' +
+          '请从发布页下载新的便携版文件替换旧文件；会话与凭据存放在 ~/.dsh，替换不会影响它们。',
+      });
+      if (response === 0) shell.openExternal(SHELL_RELEASES_URL);
+    }
+    return { ok: false, status: 'portable-manual', message: '便携版请从发布页手动下载新版本' };
+  }
+
+  shellUpdateInProgress = true;
+  setBusyIndicator(true, '正在检查桌面端更新…');
+  refreshTrayMenu();
+  let keepBusy = false;
+  try {
+    const result = await checkShellUpdateOnce();
+    if (result.status === 'error') {
+      const message = `检查失败：${result.message}`;
+      if (!silent) {
+        await dialog.showMessageBox(mainWindow, {
+          type: 'warning',
+          title: '桌面端更新',
+          message: '检查桌面端更新失败',
+          detail: `${message}\n\n提示：仓库必须公开且存在 Release（含 latest.yml）时，客户端才能获取更新。`,
+        });
+      }
+      return { ok: false, status: 'error', message };
+    }
+    if (result.status === 'none') {
+      const message = `已是最新版本 v${app.getVersion()}`;
+      if (!silent) await dialog.showMessageBox(mainWindow, { type: 'info', title: '桌面端更新', message });
+      return { ok: true, status: 'up-to-date', message };
+    }
+
+    const info = result.info;
+    if (!silent) {
+      const { response } = await dialog.showMessageBox(mainWindow, {
+        type: 'question',
+        buttons: ['下载并安装', '取消'],
+        defaultId: 0,
+        cancelId: 1,
+        title: '桌面端更新',
+        message: `发现桌面端新版本 v${info.version}`,
+        detail:
+          `当前版本：v${app.getVersion()}\n目标版本：v${info.version}\n\n` +
+          '下载完成后可立即重启安装，或稍后从托盘安装。dsh 的会话与凭据存放在 ~/.dsh，不受影响。',
+      });
+      if (response !== 0) return { ok: false, status: 'cancelled', message: '已取消下载' };
+    }
+
+    keepBusy = true;
+    autoUpdater.downloadUpdate().catch((error) => {
+      shellUpdateInProgress = false;
+      setBusyIndicator(false);
+      refreshTrayMenu();
+      log('[shell-update] 下载失败：', error.message);
+    });
+    return { ok: true, status: 'downloading', version: info.version, message: `正在下载桌面端 v${info.version}…` };
+  } finally {
+    if (!keepBusy) {
+      shellUpdateInProgress = false;
+      setBusyIndicator(false);
+      refreshTrayMenu();
+    }
+  }
+}
+
+/** 安装已下载的外壳更新（未下载时先走一次检查）。 */
+async function installShellUpdate() {
+  if (!shellUpdateReady) return checkShellUpdate({ silent: false });
+  const info = shellUpdateReady;
+  const { response } = await dialog.showMessageBox(mainWindow, {
+    type: 'question',
+    buttons: ['立即重启并安装', '稍后'],
+    defaultId: 0,
+    cancelId: 1,
+    title: '安装桌面端更新',
+    message: `安装 v${info.version} 并重启应用`,
+    detail: '将先停止本地 dsh 服务再安装，安装完成后应用会自动重新启动。',
+  });
+  if (response !== 0) return { ok: false, status: 'postponed', message: '已暂缓，可稍后从托盘安装' };
+  log('[shell-update] quitAndInstall v' + info.version);
+  quitting = true;
+  stopHarness();
+  setImmediate(() => autoUpdater.quitAndInstall());
+  return { ok: true, status: 'installing', message: `正在安装 v${info.version}` };
 }
