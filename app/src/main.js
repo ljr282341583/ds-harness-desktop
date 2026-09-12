@@ -55,11 +55,43 @@ let shellUpdateInProgress = false;
 let shellUpdateReady = null;
 
 // 简单文件日志（GUI 应用无控制台，重定向又不可靠，写文件最稳）
+// 日志只增不减会越积越大（dsh 出错时会打印几十 KB 的堆栈），因此做单份轮转：
+// 超过上限就把当前文件改名为 <file>.1（覆盖旧的 .1），保持最多两份。
+const LOG_MAX_BYTES = 5 * 1024 * 1024;
+const LOG_CHECK_EVERY_WRITES = 200;
 let _logFile = null;
+let _logWrites = 0;
+
+/** 日志超过上限则轮转；失败不影响主流程。 */
+function rotateLogIfTooLarge(file) {
+  try {
+    if (fs.statSync(file).size < LOG_MAX_BYTES) return false;
+    const backup = `${file}.1`;
+    fs.rmSync(backup, { force: true });
+    fs.renameSync(file, backup);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function log(...args) {
   try {
-    if (_logFile === null) {
+    const isFirstWrite = _logFile === null;
+    if (isFirstWrite) {
       _logFile = path.join(app.getPath('userData'), 'dsh-desktop.log');
+    }
+    let rotated = false;
+    if (isFirstWrite) {
+      // 启动时兜底检查：上次会话可能已经留下超大日志
+      rotated = rotateLogIfTooLarge(_logFile);
+    } else if (++_logWrites >= LOG_CHECK_EVERY_WRITES) {
+      // 长跑时定期检查，避免每条日志都 stat
+      _logWrites = 0;
+      rotated = rotateLogIfTooLarge(_logFile);
+    }
+    if (rotated) {
+      fs.appendFileSync(_logFile, `[${new Date().toISOString()}] 日志超过 5 MB，已轮转为 dsh-desktop.log.1\n`);
     }
     fs.appendFileSync(_logFile, `[${new Date().toISOString()}] ${args.map(String).join(' ')}\n`);
   } catch {
@@ -389,6 +421,8 @@ async function startHarness() {
   const childLogPath = path.join(app.getPath('userData'), 'dsh-child.log');
   let childLogFd = null;
   try {
+    // 每次拉起 dsh 前先按大小轮转，避免崩溃堆栈把日志撑爆
+    rotateLogIfTooLarge(childLogPath);
     childLogFd = fs.openSync(childLogPath, 'a');
   } catch {
     /* ignore */
@@ -810,7 +844,9 @@ function initShellUpdater() {
       error: (...args) => log('[shell-update][error]', ...args),
       debug: () => {},
     };
-    // 下载与安装都交给用户确认：autoDownload=false 让「检查」只查不下载
+    // autoDownload=false：点「检查」只查不下载，下载需用户确认。
+    // autoInstallOnAppQuit=true：已下载的更新若用户没点「立即重启安装」，
+    // 会在退出应用时自动装上 —— 避免"下载了却一直没落地"这个常见困扰。
     autoUpdater.autoDownload = false;
     autoUpdater.autoInstallOnAppQuit = true;
 
@@ -938,7 +974,8 @@ async function checkShellUpdate(options = {}) {
         message: `发现桌面端新版本 v${info.version}`,
         detail:
           `当前版本：v${app.getVersion()}\n目标版本：v${info.version}\n\n` +
-          '下载完成后可立即重启安装，或稍后从托盘安装。dsh 的会话与凭据存放在 ~/.dsh，不受影响。',
+          '下载完成后可立即重启安装；选择「稍后」则会在退出应用时自动装上。\n' +
+          'dsh 的会话与凭据存放在 ~/.dsh，不受影响。',
       });
       if (response !== 0) return { ok: false, status: 'cancelled', message: '已取消下载' };
     }
@@ -966,7 +1003,7 @@ async function installShellUpdate() {
   const info = shellUpdateReady;
   const { response } = await dialog.showMessageBox(mainWindow, {
     type: 'question',
-    buttons: ['立即重启并安装', '稍后'],
+    buttons: ['立即重启并安装', '稍后（退出应用时自动安装）'],
     defaultId: 0,
     cancelId: 1,
     title: '安装桌面端更新',

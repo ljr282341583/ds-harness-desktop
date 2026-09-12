@@ -21,8 +21,10 @@
 
 | 版本 | 下载 | 说明 |
 |---|---|---|
-| 安装版（推荐） | [DS-Harness-Desktop-Setup-0.3.0.exe](https://github.com/ljr282341583/ds-harness-desktop/releases/download/v0.3.0/DS-Harness-Desktop-Setup-0.3.0.exe) | 向导安装，带开始菜单 / 桌面快捷方式 / 卸载入口；**支持托盘一键自更新** |
-| 便携版 | [DS-Harness-Desktop-0.3.0-portable.exe](https://github.com/ljr282341583/ds-harness-desktop/releases/download/v0.3.0/DS-Harness-Desktop-0.3.0-portable.exe) | 免安装单文件，双击即用，适合拷贝分发；每次启动需自解压，且**无法原地自更新**（会引导手动下载新文件） |
+| 安装版（推荐） | [DS-Harness-Desktop-Setup-0.3.1.exe](https://github.com/ljr282341583/ds-harness-desktop/releases/download/v0.3.1/DS-Harness-Desktop-Setup-0.3.1.exe) | 向导安装，带开始菜单 / 桌面快捷方式 / 卸载入口；**支持托盘一键自更新** |
+| 便携版 | [DS-Harness-Desktop-0.3.1-portable.exe](https://github.com/ljr282341583/ds-harness-desktop/releases/download/v0.3.1/DS-Harness-Desktop-0.3.1-portable.exe) | 免安装单文件，双击即用，适合拷贝分发；每次启动需自解压，且**无法原地自更新**（会引导手动下载新文件） |
+
+> 想找历史版本或全部资产（含 `latest.yml`），见 [Releases 列表](https://github.com/ljr282341583/ds-harness-desktop/releases)。
 
 > 安装包未做代码签名，被 SmartScreen 拦截时点「更多信息 → 仍要运行」。
 
@@ -71,6 +73,8 @@
   若新版本装了却启动不起来，程序会自动回退到内置版本并重启一次。
 - **不影响你的数据**：更新只写入应用自己的数据目录，不触碰 `~/.dsh` 里的密钥、会话、skills 与 profiles。
 - **磁盘占用**：只保留当前版本与上一个可用版本，其余自动清理。
+- **「稍后」的含义**：桌面端更新下载完后如果选「稍后（退出应用时自动安装）」，
+  下次退出应用时会自动装上，不会一直悬着没落地。
 - **便携版差异**：便携版每次启动都会自解压到临时目录，无法在原地替换自己，因此「检查桌面端更新」会引导你从发布页下载新的便携版文件；dsh 本体更新在两种形态上都能用。
 
 ### 常见问题
@@ -150,3 +154,4 @@ GitHub Actions（`.github/workflows/release.yml`）会同步版本号、安装�
 | 2026-09-12 | 发布 v0.3.0：新增两层更新能力。① dsh 本体：托盘「检查 dsh 更新」检测官方新版本并即时安装，含版本通道（stable/preview）、兼容守卫、启动冒烟验证、失败回滚与自动回退内置版本；② 桌面端自身：`electron-updater` + GitHub Releases 自更新；新增 `.github/workflows/release.yml`，打 tag 自动打包发布（含 `latest.yml`）。修复冷启动鉴权失败（等待 token 地址上限 30s → 120s，迟到 token 自动重载）。侧车运行时改为须含 npm |
 | 2026-09-12 | 仓库转为公开：客户端可匿名拉取 Release 与更新清单（公开前已扫描提交历史与工作区，未发现密钥/令牌） |
 | 2026-09-12 | 修复发布形态：`publish` 段显式指定 `releaseType: release`，避免 electron-builder 默认把 Release 建成草稿（草稿对客户端不可见，会导致「检查桌面端更新」永远拉不到新版本） |
+| 2026-09-13 | 发布 v0.3.1：日志按大小轮转（上限 5 MB，保留 `.1` 备份），避免长期运行把日志撑满磁盘；冒烟验证不再把调用方的完整环境变量交给新下载的包，改为最小环境白名单；明确「稍后」= 退出应用时自动安装；CI 增加「写入 Release 说明」（取 tag 注释），修掉此前 Release 正文为空的退化 |

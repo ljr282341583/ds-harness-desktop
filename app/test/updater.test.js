@@ -223,9 +223,28 @@ console.log('\n[3] checkForUpdate 判定');
   });
 
   // -------------------------------------------------------------------------
+  console.log('\n[6] 冒烟验证的环境收敛');
+  // -------------------------------------------------------------------------
+
+  test('minimalSmokeEnv 不携带调用方的敏感变量', () => {
+    process.env.DSH_TEST_FAKE_SECRET = 'sk-should-not-leak-0123456789';
+    const env = updater.minimalSmokeEnv('C:\\tmp\\smoke-home');
+    assert.equal(env.DSH_TEST_FAKE_SECRET, undefined);
+    assert.equal(env.DSH_HOME, 'C:\\tmp\\smoke-home');
+    assert.equal(env.DSH_TELEMETRY_DISABLED, '1');
+    delete process.env.DSH_TEST_FAKE_SECRET;
+  });
+
+  test('minimalSmokeEnv 保留进程启动所需的系统变量', () => {
+    const env = updater.minimalSmokeEnv('/tmp/home');
+    assert.ok(env.PATH || env.Path, '应保留 PATH');
+    assert.ok(env.SystemRoot, '应保留 SystemRoot');
+  });
+
+  // -------------------------------------------------------------------------
   const runE2E = process.argv.includes('--e2e');
   if (runE2E) {
-    console.log('\n[6] 端到端：真实下载安装 + 冒烟验证 + 激活 + 回滚');
+    console.log('\n[7] 端到端：真实下载安装 + 冒烟验证 + 激活 + 回滚');
     const e2eRoot = tmpRoot('e2e');
     const npmCli = process.env.DSH_TEST_NPM_CLI;
     // 允许注入侧车 node.exe，以验证"出厂配置"（捆绑 node + 捆绑 npm）真实可用

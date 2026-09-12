@@ -356,6 +356,48 @@ function killTree(child) {
 }
 
 /**
+ * 冒烟验证用的最小环境变量集合。
+ *
+ * 冒烟跑的是**刚从网络下载下来的包**，不应把调用方的完整环境交给它 —— 里面可能
+ * 有 API Key、访问令牌、代理凭据等。这里只保留进程正常启动所需的系统变量，
+ * 外加把 DSH_HOME 指向临时目录。
+ */
+const SMOKE_ENV_ALLOWLIST = [
+  'PATH',
+  'Path',
+  'PATHEXT',
+  'SystemRoot',
+  'SystemDrive',
+  'windir',
+  'COMSPEC',
+  'TEMP',
+  'TMP',
+  'USERPROFILE',
+  'HOMEDRIVE',
+  'HOMEPATH',
+  'APPDATA',
+  'LOCALAPPDATA',
+  'NUMBER_OF_PROCESSORS',
+  'PROCESSOR_ARCHITECTURE',
+  'PROCESSOR_IDENTIFIER',
+  'OS',
+  'LANG',
+  'LC_ALL',
+  'TZ',
+];
+
+function minimalSmokeEnv(smokeHome) {
+  const env = {};
+  for (const key of SMOKE_ENV_ALLOWLIST) {
+    if (process.env[key] !== undefined) env[key] = process.env[key];
+  }
+  env.DSH_HOME = smokeHome;
+  // 冒烟只验证能否启动，不需要上报遥测
+  env.DSH_TELEMETRY_DISABLED = '1';
+  return env;
+}
+
+/**
  * 冒烟验证候选版本。成功条件：在超时前打印出带 token 的启动地址。
  * 全程使用临时 DSH_HOME，绝不触碰用户真实的 ~/.dsh。
  */
@@ -374,7 +416,7 @@ async function smokeTest(options) {
   log(`smoke: node ${binPath} web --port ${port} (DSH_HOME=${smokeHome})`);
   const child = spawn(nodePath, [binPath, 'web', '--port', String(port), '--no-open'], {
     cwd: options.cwd,
-    env: { ...process.env, DSH_HOME: smokeHome },
+    env: minimalSmokeEnv(smokeHome),
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -546,6 +588,8 @@ module.exports = {
   readPackageVersion,
   checkCompatibility,
   installVersion,
+  SMOKE_ENV_ALLOWLIST,
+  minimalSmokeEnv,
   smokeTest,
   activate,
   deactivate,
