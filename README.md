@@ -21,8 +21,8 @@
 
 | 版本 | 下载 | 说明 |
 |---|---|---|
-| 安装版（推荐） | [DS-Harness-Desktop-Setup-0.3.2.exe](https://github.com/ljr282341583/ds-harness-desktop/releases/download/v0.3.2/DS-Harness-Desktop-Setup-0.3.2.exe) | 静默一键安装，带开始菜单 / 桌面快捷方式 / 卸载入口；**支持托盘一键自更新** |
-| 便携版 | [DS-Harness-Desktop-0.3.2-portable.exe](https://github.com/ljr282341583/ds-harness-desktop/releases/download/v0.3.2/DS-Harness-Desktop-0.3.2-portable.exe) | 免安装单文件，双击即用，适合拷贝分发；每次启动需自解压，且**无法原地自更新**（会引导手动下载新文件） |
+| 安装版（推荐） | [DS-Harness-Desktop-Setup-0.3.3.exe](https://github.com/ljr282341583/ds-harness-desktop/releases/download/v0.3.3/DS-Harness-Desktop-Setup-0.3.3.exe) | 向导安装（**可自选安装目录**），带开始菜单 / 桌面快捷方式 / 卸载入口；**支持托盘一键自更新** |
+| 便携版 | [DS-Harness-Desktop-0.3.3-portable.exe](https://github.com/ljr282341583/ds-harness-desktop/releases/download/v0.3.3/DS-Harness-Desktop-0.3.3-portable.exe) | 免安装单文件，双击即用，适合拷贝分发；每次启动需自解压，且**无法原地自更新**（会引导手动下载新文件） |
 
 > 想找历史版本或全部资产（含 `latest.yml`），见 [Releases 列表](https://github.com/ljr282341583/ds-harness-desktop/releases)。
 
@@ -157,3 +157,4 @@ GitHub Actions（`.github/workflows/release.yml`）会同步版本号、安装�
 | 2026-09-12 | 修复发布形态：`publish` 段显式指定 `releaseType: release`，避免 electron-builder 默认把 Release 建成草稿（草稿对客户端不可见，会导致「检查桌面端更新」永远拉不到新版本） |
 | 2026-09-13 | 发布 v0.3.1：日志按大小轮转（上限 5 MB，保留 `.1` 备份），避免长期运行把日志撑满磁盘；冒烟验证不再把调用方的完整环境变量交给新下载的包，改为最小环境白名单；明确「稍后」= 退出应用时自动安装；CI 增加「写入 Release 说明」（取 tag 注释），修掉此前 Release 正文为空的退化 |
 | 2026-09-13 | 发布 v0.3.2：**修复自动更新会把应用装坏**的问题 —— 安装器启动前先等 dsh 子进程真正退出（此前安装器与正在退出的进程抢安装目录里的文件，导致「删了旧文件没装回新文件」）；改用 oneClick 静默安装（向导式 + 自选安装目录在 electron-updater 的 `--updated` 流程下不可靠）；不再在退出应用时静默安装，安装只在用户确认时进行；补「更新后打不开」的恢复说明 |
+| 2026-09-13 | 发布 v0.3.3：撤销 v0.3.2 的 oneClick 改动，恢复**向导式安装 + 可自选安装目录**（根因是停机竞态，已由 stopHarnessAndWait 修复，不必牺牲这个能力） |
