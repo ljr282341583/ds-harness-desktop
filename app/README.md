@@ -16,7 +16,7 @@ dsh 本体（不重打包），以及外壳自身更新（electron-updater + Git
 | `scripts/prepare-runtime.ps1` | 一键准备侧车运行时（Node 24 + 捆绑 npm） |
 | `package.json` | 依赖（捆绑 `@deepseek-ai/dsh`）与脚本 |
 | `electron-builder.yml` | 打包配置（NSIS + portable，产物到 `../产出`） |
-| `build/afterPack.js` | 打包钩子：覆盖 electron-builder 的不完整依赖裁剪 + rcedit 嵌图标/版本 |
+| `build/afterPack.js` | 打包钩子：用 `npm ci --omit=dev` 重建"仅运行时依赖"的 node_modules（并按规则修剪），再做依赖守卫与 rcedit 嵌图标/版本 |
 | `build/icon.ico` | 应用/安装器图标（多尺寸，由 `app-builder icon` 从 PNG 生成） |
 | `build/rcedit-x64.exe` | 手动解压的 rcedit（用于嵌图标；app-builder 内置 rcedit 会去下载 winCodeSign 触发符号链接问题） |
 | `runtime/` | 捆绑的独立 Node 24 运行时（侧车）：`node.exe` + `node_modules/npm`，用于运行 dsh 并在应用内安装新版本 |
@@ -93,6 +93,21 @@ npm run test:e2e   # 追加真实端到端：下载安装 rc.2 + 冒烟验证 + 
 - **保留策略**：只保留当前版本与上一个可用版本，其余版本目录自动清理。
 
 > 内置版本是保底：卸载更新版本只会回到随安装包捆绑的 dsh，不需要重新安装应用。
+
+## 安装包体积与安装速度
+
+安装包只该包含**运行时真正需要**的东西：
+
+- `afterPack` 不再把开发态 `node_modules` 原样塞进安装包——那会把整套 Electron 构建工具链
+  （`@electron/*`、`7zip-bin` 等 260 个包、上万文件）一起发给用户。
+  现在改为用 `npm ci --omit=dev` 生成生产依赖树（含全部 240 个 `@deepseek-ai/*` 包），
+  按内容哈希缓存在系统临时目录，避免每次构建重装。
+- 同时修剪运行时不会加载的文件：sourcemap（`.map`）与 TypeScript 类型声明（`.d.ts`）。
+  注意：**目录名只在"包根"判定**——`yaml/dist/doc/` 这类包内部目录是运行时依赖，
+  按名字全局删除会导致 dsh 启动失败（曾真实踩到）。
+
+效果：安装包约 213 MB → 130 MB，安装后约 811 MB / 3.4 万文件 → 462 MB / 1.3 万文件。
+安装时间主要受文件数影响，因此这个改动对"装得慢"帮助最直接。
 
 ## 外壳自更新
 
