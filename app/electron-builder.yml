@@ -31,6 +31,9 @@ publish:
   provider: github
   owner: ljr282341583
   repo: ds-harness-desktop
+  # 直接发布为正式 Release。electron-builder 默认建草稿，草稿对客户端不可见，
+  # 会导致「检查桌面端更新」永远拉不到新版本。
+  releaseType: release
 
 # 把独立 Node 运行时复制到 resources/runtime，供主进程 spawn dsh
 extraResources:
