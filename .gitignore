@@ -12,3 +12,27 @@ Thumbs.db
 
 # agent-loop 代理工作记忆（本仓库本地状态，不入库、不随仓库公开）
 .agent-loop/
+
+# ---- DSH 双机同步：这些目录各机重装即可，不进 git ----
+node_modules/
+.venv/
+venv/
+__pycache__/
+dist/
+build/
+out/
+target/
+.next/
+.cache/
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+
+# ---- 本地私有配置 / 运行时数据：不该进 git ----
+# 微信小程序：project.config.json 是共享的要留着，.private.config.json 是本机的
+project.private.config.json
+*.private.config.json
+# DSH 自己的用量账本（有时会落在项目目录里）
+dsh-usage/
+.dsh-usage-boot.log*
