@@ -72,14 +72,27 @@ function hashFiles(files) {
   return hash.digest('hex').slice(0, 16);
 }
 
-/** 优先用捆绑的 Node 24 侧车 + 其自带 npm；找不到再退回 PATH 上的 npm。 */
+/**
+ * 解析运行 npm 的方式。
+ *
+ * 优先级：
+ * 1) 捆绑的 Node 24 侧车 + 侧车自带 npm（出厂配置）；
+ * 2) 运行 electron-builder 的 Node（process.execPath）+ 同目录安装的 npm-cli.js；
+ * 3) cmd.exe /c npm.cmd —— 不能裸 spawn `npm.cmd`：Node 24 起（CVE-2024-27980 加固）
+ *    直接 spawn .cmd/.bat 会报 EINVAL，spawnSync 表现为 status=null 且无任何输出。
+ *    侧车不含 npm 时（见硬约束 3）会走到回退路径，这个坑必须绕开。
+ */
 function resolveNpmRunner(appDir) {
   const nodeExe = path.join(appDir, 'runtime', 'node.exe');
   const npmCli = path.join(appDir, 'runtime', 'node_modules', 'npm', 'bin', 'npm-cli.js');
   if (fs.existsSync(nodeExe) && fs.existsSync(npmCli)) {
     return { command: nodeExe, prefixArgs: [npmCli] };
   }
-  return { command: process.platform === 'win32' ? 'npm.cmd' : 'npm', prefixArgs: [] };
+  const systemNpmCli = path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
+  if (fs.existsSync(systemNpmCli)) {
+    return { command: process.execPath, prefixArgs: [systemNpmCli] };
+  }
+  return { command: process.env.ComSpec || 'cmd.exe', prefixArgs: ['/c', 'npm.cmd'] };
 }
 
 /**
@@ -114,8 +127,13 @@ function prepareProductionDeps(appDir) {
     { cwd: workDir, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, encoding: 'utf8' },
   );
   if (result.status !== 0) {
+    // result.error（spawnSync 根本没启动起来时 status=null、stderr 为空）必须显式带上，
+    // 否则 EINVAL/ENOENT 这类失败会表现为空错误信息，极难诊断。
+    const detail = result.error
+      ? `${result.error.message}`
+      : (result.stderr || result.stdout || '').trim().slice(-500);
     throw new Error(
-      `[afterPack] 安装生产依赖失败（exit=${result.status}）：${(result.stderr || result.stdout || '').trim().slice(-500)}\n` +
+      `[afterPack] 安装生产依赖失败（exit=${result.status}）：${detail}\n` +
         '提示：该步骤需要能访问 npm registry。若要离线构建，可先手工准备缓存。',
     );
   }

@@ -17,7 +17,9 @@ const os = require('node:os');
 const updater = require('./updater.js');
 const { autoUpdater } = require('electron-updater');
 
-const DEFAULT_PORT = 3080;
+// 起始端口可用 DSH_DESKTOP_PORT 覆盖：冒烟/验证时本机往往已有 dsh web 占着 3080，
+// 固定端口会走到「复用已有实例」分支，验证就测不到真实启动路径。
+const DEFAULT_PORT = Number(process.env.DSH_DESKTOP_PORT) || 3080;
 const MAX_PORT_TRIES = 10;
 const READY_TIMEOUT_MS = 30_000;
 const READY_POLL_MS = 250;
@@ -104,7 +106,15 @@ function log(...args) {
 // ---------------------------------------------------------------------------
 // 单实例锁：二次启动时聚焦已有窗口
 // ---------------------------------------------------------------------------
-const gotLock = app.requestSingleInstanceLock();
+// 冒烟/验证隔离：DSH_DESKTOP_USER_DATA 重定向用户数据目录（日志、更新状态、单实例锁），
+// 让验证实例与真实安装实例互不干扰，也不污染真实日志。必须在取单实例锁之前生效。
+if (process.env.DSH_DESKTOP_USER_DATA) {
+  app.setPath('userData', process.env.DSH_DESKTOP_USER_DATA);
+}
+
+// 验证/冒烟模式（DSH_DESKTOP_SMOKE=1）：不抢单实例锁，允许与正在运行的正式实例并存。
+// 仅验证用途；三个隔离 env（端口 / userData / 本开关）齐用才能保证互不干扰。
+const gotLock = process.env.DSH_DESKTOP_SMOKE === '1' || app.requestSingleInstanceLock();
 
 if (!gotLock) {
   app.quit();

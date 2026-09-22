@@ -8,10 +8,11 @@
   "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "build": "electron-builder --win",
-    "build:dir": "electron-builder --dir",
+    "build": "electron-builder --win && node test/smoke.test.js --packaged",
+    "build:dir": "electron-builder --dir && node test/smoke.test.js --packaged",
     "test": "node test/updater.test.js",
-    "test:e2e": "node test/updater.test.js --e2e"
+    "test:e2e": "node test/updater.test.js --e2e",
+    "verify:smoke": "node test/smoke.test.js"
   },
   "dependencies": {
     "@deepseek-ai/dsh": "0.1.5-rc.1",
