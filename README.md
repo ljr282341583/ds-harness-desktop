@@ -21,8 +21,8 @@
 
 | 版本 | 下载 | 说明 |
 |---|---|---|
-| 安装版（推荐） | [DS-Harness-Desktop-Setup-0.3.4.exe](https://github.com/ljr282341583/ds-harness-desktop/releases/download/v0.3.4/DS-Harness-Desktop-Setup-0.3.4.exe) | 向导安装（**可自选安装目录**），带开始菜单 / 桌面快捷方式 / 卸载入口；**支持托盘一键自更新** |
-| 便携版 | [DS-Harness-Desktop-0.3.4-portable.exe](https://github.com/ljr282341583/ds-harness-desktop/releases/download/v0.3.4/DS-Harness-Desktop-0.3.4-portable.exe) | 免安装单文件，双击即用，适合拷贝分发；每次启动需自解压，且**无法原地自更新**（会引导手动下载新文件） |
+| 安装版（推荐） | [DS-Harness-Desktop-Setup-0.3.5.exe](https://github.com/ljr282341583/ds-harness-desktop/releases/download/v0.3.5/DS-Harness-Desktop-Setup-0.3.5.exe) | 向导安装（**可自选安装目录**），带开始菜单 / 桌面快捷方式 / 卸载入口；**支持托盘一键自更新** |
+| 便携版 | [DS-Harness-Desktop-0.3.5-portable.exe](https://github.com/ljr282341583/ds-harness-desktop/releases/download/v0.3.5/DS-Harness-Desktop-0.3.5-portable.exe) | 免安装单文件，双击即用，适合拷贝分发；每次启动需自解压，且**无法原地自更新**（会引导手动下载新文件） |
 
 > 想找历史版本或全部资产（含 `latest.yml`），见 [Releases 列表](https://github.com/ljr282341583/ds-harness-desktop/releases)。
 
@@ -73,6 +73,7 @@
   若新版本装了却启动不起来，程序会自动回退到内置版本并重启一次。
 - **不影响你的数据**：更新只写入应用自己的数据目录，不触碰 `~/.dsh` 里的密钥、会话、skills 与 profiles。
 - **磁盘占用**：只保留当前版本与上一个可用版本，其余自动清理。
+- **更新装回原目录**：安装器按注册表记忆键**原地更新**；更新向导第一页「装给谁」保持默认即可——切换模式会改用该模式的默认目录（如全机模式的 Program Files），且更新时目录页会被跳过、没有机会手改。
 - **「稍后」的含义**：桌面端更新下载完后如果选「稍后」，会暂不安装；托盘里会出现
   「重启并安装 vX」，想装的时候点它（安装前会先干净停掉 dsh 服务）。
 - **便携版差异**：便携版每次启动都会自解压到临时目录，无法在原地替换自己，因此「检查桌面端更新」会引导你从发布页下载新的便携版文件；dsh 本体更新在两种形态上都能用。
@@ -84,7 +85,7 @@
 | 一直停在「正在启动…」 | dsh 首次初始化可能较慢，等 10~60 秒；仍不行则托盘「重启服务」 |
 | 显示「服务不可用」 | 先点错误页的「重启服务」；若反复出现，多半是 `~/.dsh/profiles` 里的第三方插件与当前 dsh 版本不兼容（dsh 启动会直接退出）。可查看 `%APPDATA%\ds-harness-desktop\dsh-child.log`，日志里会指明是哪个插件；临时办法是先在 profile 里移除该插件 |
 | 检查更新提示已是最新 | `stable` 通道跟官方 `latest` 标签，官方未提升该标签时就显示已是最新；想尝鲜可切到 `preview` |
-| 更新下载很慢 | 安装包约 213 MB，且需访问 GitHub；网络受限时可能超时 |
+| 更新下载很慢 | 安装包约 130 MB（v0.3.4 起瘦身，此前约 213 MB），且需访问 GitHub；网络受限时可能超时 |
 | **更新后应用打不开** | 从 [Releases](https://github.com/ljr282341583/ds-harness-desktop/releases/latest) 重新下载最新安装包再装一次即可修复（只覆盖程序文件，不会动 `~/.dsh` 里的会话与密钥）。v0.3.1 的自动更新曾出现装坏的情况，v0.3.2 已修 |
 | 窗口关了找不到 | 它在托盘里，单击托盘图标唤回 |
 
@@ -95,8 +96,8 @@
 1. 安装依赖：`cd app && npm ci`（按 lockfile 精确安装，勿用 `npm install`）
 2. 准备侧车运行时（`app\runtime\`，须含 npm）：`powershell -ExecutionPolicy Bypass -File app\scripts\prepare-runtime.ps1`
 3. 开发运行：`cd app && npm start`
-4. 打包：`cd app && npm run build`（产物输出到 `产出\`）
-5. 更新器测试：`cd app && npm test`（离线单测）；`npm run test:e2e` 追加真实下载安装 + 冒烟验证
+4. 打包 + 体检：`cd app && npm run build` = electron-builder 打包后自动跑 `verify:smoke` 冒烟体检（离线单测 / 静态检查 / 侧车启动 / 包启动 / 安装器端到端；输出「失败 0」即全绿，产物输出到 `产出\`）
+5. 单独体检：`cd app && npm run verify:smoke`（安装器端到端检测到正式实例在跑会自动跳过防误杀）；更新器单测 `cd app && npm test`（24 项离线）；`npm run test:e2e` 追加真实下载安装 + 冒烟验证
 
 > 拿到成品后如何使用见 `docs\使用方法.md`；如何把成品分发给别人见 `docs\分发说明.md`；设计与决策见 `docs\设计方案.md`。
 
@@ -110,11 +111,11 @@
 **发布新版本**：
 
 ```sh
-git tag v0.3.1
-git push origin v0.3.1
+git tag -a v0.3.6 -m "v0.3.6 变更说明（此注释会成为 Release 正文）"
+git push origin v0.3.6
 ```
 
-GitHub Actions（`.github/workflows/release.yml`）会同步版本号、安装依赖、准备 Node 24 侧车（含 npm）、跑更新器单测，然后打包并把 NSIS 安装器、便携版与 `latest.yml` 发布到 Releases。
+GitHub Actions（`.github/workflows/release.yml`）会同步版本号、安装依赖、准备 Node 24 侧车（含 npm）、跑更新器单测，然后打包发布到 Releases：NSIS 安装器 + blockmap + 便携版 + `latest.yml`（**连字符**文件名，与更新清单一致），并把 tag 注释写成 Release 说明。
 
 > 客户端要求仓库公开，且 Release 必须包含 `latest.yml`（由 CI 自动上传，手动上传 exe 是不够的）。
 > 日常的 dsh 版本升级**不需要**发新外壳。
@@ -139,7 +140,7 @@ GitHub Actions（`.github/workflows/release.yml`）会同步版本号、安装�
 - 项目名称：DS Harness Desktop（ds-harness-desktop）
 - 创建日期：2026-08-14
 - 项目目标：为 DeepSeek Harness（`@deepseek-ai/dsh`，Node.js + Cordis 插件化 Agent Harness）提供一个桌面端形态。DSH 以 `dsh web` 启动本地 Web 服务器（webserver + 前端静态资源 + apiproxy），桌面版把这套能力装进原生窗口，并保留完整工具链。
-- 当前状态：v0.3.0 已发布（NSIS 安装器 + portable 便携版；含托盘/生命周期/Node 24 侧车、应用内 dsh 一键更新、桌面端自更新）
+- 当前状态：v0.3.5 已发布（NSIS 安装器 + portable 便携版；两层更新、打 tag 自动发版流水线与真机自更新均已实测验证；更新反馈三件套与打包体检源码就绪，随 0.3.6 生效）
 - 验收标准：见 `docs\设计方案.md` 第 6 节
 
 ## 变更记录
@@ -159,3 +160,5 @@ GitHub Actions（`.github/workflows/release.yml`）会同步版本号、安装�
 | 2026-09-13 | 发布 v0.3.2：**修复自动更新会把应用装坏**的问题 —— 安装器启动前先等 dsh 子进程真正退出（此前安装器与正在退出的进程抢安装目录里的文件，导致「删了旧文件没装回新文件」）；改用 oneClick 静默安装（向导式 + 自选安装目录在 electron-updater 的 `--updated` 流程下不可靠）；不再在退出应用时静默安装，安装只在用户确认时进行；补「更新后打不开」的恢复说明 |
 | 2026-09-13 | 发布 v0.3.3：撤销 v0.3.2 的 oneClick 改动，恢复**向导式安装 + 可自选安装目录**（根因是停机竞态，已由 stopHarnessAndWait 修复，不必牺牲这个能力） |
 | 2026-09-13 | 发布 v0.3.4：**安装包瘦身，装得更快** —— 打包时不再把开发态 node_modules 整个塞进去（那会把整套 Electron 构建工具链、260 个包、上万文件发给用户），改用 `npm ci --omit=dev` 生成运行时依赖树并修剪 sourcemap 与 `.d.ts`。安装包 213 MB → **130 MB**，安装后 811 MB/3.4 万文件 → **462 MB/1.3 万文件** |
+| 2026-09-23 | 发布 v0.3.5：发版流水线整条走通——打 tag 触发 CI 十步全绿，正式 Release 四资产（Setup / blockmap / portable / latest.yml，连字符名与更新清单一致）；真机完成 0.3.4→0.3.5 自更新全链路验证（发现 → 下载 → 安装 → 自动重启，`~/.dsh` 无损）；核对「本地产物名带空格、Releases 连字符」是同一文件；确认 `prepare-runtime.ps1` 本就是官方脚本、发布物侧车含 npm（文档据实纠偏） |
+| 2026-09-23 | 源码就绪（待 0.3.6 生效）：更新反馈三件套——下载完成弹窗「立即重启并安装」、下载失败弹窗、下载中「正在下载桌面端 vX…」文案；`npm run build` 挂 `verify:smoke` 冒烟体检（失败 0 即全绿，[5] 安装器端到端检测到正式实例自动跳过防误杀） |
