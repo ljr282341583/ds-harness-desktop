@@ -354,6 +354,105 @@ function countForeignInstances() {
     .filter((line) => line.toLowerCase().includes('ds harness desktop.exe')).length;
 }
 
+/**
+ * 结束命令行里引用了 dir 的残留进程（隔离实例的 dsh/node 后代可能逃出进程树，
+ * 清理时还占着句柄 → Windows 删除必现 EPERM）。dir 经环境变量传递，避免筛选串
+ * 出现在自身命令行里造成自匹配；找不到任何进程时无副作用。
+ */
+function killProcessesUnder(dir) {
+  const cmd =
+    "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine -like ('*' + $env:DSH_SWEEP_DIR + '*') -and $_.ProcessId -ne $PID } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }";
+  spawnSync('powershell', ['-NoProfile', '-Command', cmd], {
+    encoding: 'utf8',
+    windowsHide: true,
+    timeout: 30_000,
+    env: { ...process.env, DSH_SWEEP_DIR: dir },
+  });
+}
+
+/**
+ * 删临时树的稳妥版：先清只读位（Windows 只读文件 unlink 必现 EPERM，重试也救不了），
+ * 再带重试删除。失败直接抛，由调用方决定告警还是计为失败。
+ */
+function removeTreeSafe(root) {
+  if (!fs.existsSync(root)) return;
+  const clearReadOnly = (target) => {
+    let stat;
+    try {
+      stat = fs.lstatSync(target);
+    } catch {
+      return;
+    }
+    try {
+      if ((stat.mode & 0o200) === 0) fs.chmodSync(target, stat.mode | 0o666);
+    } catch {
+      // 单个文件清不掉就先继续，交给 rmSync 重试
+    }
+    if (stat.isDirectory()) {
+      for (const entry of fs.readdirSync(target)) clearReadOnly(path.join(target, entry));
+    }
+  };
+  clearReadOnly(root);
+  fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 500 });
+}
+
+/**
+ * 把本机已登记的卸载注册表键导出暂存并删除。
+ *
+ * NSIS 安装器的 uninstallOldVersion 宏（installSection.nsh）会按注册表找到"旧安装"
+ * 并先静默跑它的卸载器——temp 验证安装若不先藏起这些键，会把用户的真实安装整个
+ * 当旧版卸掉（本项目实测踩过：真实目录被清空、快捷方式被删）。
+ * 同时返回真实安装目录，供最后断言"真安装体未被测试破坏"。
+ */
+function stashUninstallKeys(backupDir) {
+  fs.mkdirSync(backupDir, { recursive: true });
+  const root = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall';
+  const entries = [];
+  const realDirs = [];
+  const q = spawnSync('reg', ['query', root], { encoding: 'utf8', windowsHide: true });
+  const subKeys = String(q.stdout || '')
+    .split(/\r?\n/)
+    .map((line) => (line.match(/HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\(\S+)$/) || [])[1])
+    .filter(Boolean);
+  for (const name of subKeys) {
+    const key = `${root}\\${name}`;
+    const dn = spawnSync('reg', ['query', key, '/v', 'DisplayName'], { encoding: 'utf8', windowsHide: true });
+    if (!/DS Harness Desktop/i.test(String(dn.stdout || ''))) continue;
+    const file = path.join(backupDir, `regkey-${entries.length}.reg`);
+    const ex = spawnSync('reg', ['export', key, file, '/y'], { encoding: 'utf8', windowsHide: true });
+    if (ex.status !== 0 || !fs.existsSync(file)) continue;
+    // 推断真实安装目录：优先 InstallLocation，退化到 UninstallString 的引号内路径
+    //（UninstallString 形如 `"C:\path\Uninstall DS Harness Desktop.exe" /currentuser`，
+    //  末尾带 /currentuser，不能用行尾锚点匹配）
+    const loc = spawnSync('reg', ['query', key, '/v', 'InstallLocation'], { encoding: 'utf8', windowsHide: true });
+    const ul = spawnSync('reg', ['query', key, '/v', 'UninstallString'], { encoding: 'utf8', windowsHide: true });
+    const locM = String(loc.stdout || '').match(/InstallLocation\s+REG_\w+\s+(.+)$/m);
+    const ulM =
+      String(ul.stdout || '').match(/UninstallString\s+REG_\w+\s+"([^"]+)"/) ||
+      String(ul.stdout || '').match(/UninstallString\s+REG_\w+\s+(\S+)/);
+    const dir = locM && locM[1].trim()
+      ? locM[1].trim()
+      : ulM
+        ? path.dirname(ulM[1].trim().replace(/^"|"$/g, ''))
+        : null;
+    if (dir && fs.existsSync(path.join(dir, APP_EXE_NAME))) realDirs.push(dir);
+    spawnSync('reg', ['delete', key, '/f'], { encoding: 'utf8', windowsHide: true });
+    entries.push({ key, file });
+    console.log(`       | 暂存卸载键 ${name}${dir ? `（真实安装 ${dir}）` : ''}`);
+  }
+  return { entries, realDirs };
+}
+
+/** 把暂存的卸载注册表键原样导回（temp 安装会占用同名键，必须恢复原内容）。 */
+function restoreUninstallKeys(entries) {
+  for (const e of entries) {
+    if (fs.existsSync(e.file)) {
+      const r = spawnSync('reg', ['import', e.file], { encoding: 'utf8', windowsHide: true });
+      if (r.status !== 0) console.warn(`       ! 卸载键恢复失败 ${e.key}：${String(r.stderr || '').trim()}`);
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 async function main() {
   // -------------------------------------------------------------------------
@@ -457,7 +556,12 @@ async function main() {
         });
         console.log(`       监听于 127.0.0.1:${alivePort}，进程存活（耗时 ${secs}s）`);
       } finally {
-        fs.rmSync(tempBase, { recursive: true, force: true });
+        try {
+          killProcessesUnder(tempBase);
+          removeTreeSafe(tempBase);
+        } catch (error) {
+          console.warn(`       ! 临时目录清理失败（不影响判定）：${error.message}`);
+        }
       }
     });
   }
@@ -485,9 +589,17 @@ async function main() {
       const installDir = path.join(tempBase, 'installed-app');
       const backupDir = path.join(tempBase, 'shortcut-backup');
       let snap = null;
+      let keyStash = [];
+      const realDirs = [];
       try {
         console.log(`       | 安装包 ${path.basename(installer)}`);
         snap = snapshotShortcuts(backupDir);
+        const keyInfo = stashUninstallKeys(backupDir);
+        keyStash = keyInfo.entries;
+        realDirs.push(...keyInfo.realDirs);
+        if (keyStash.length > 0) {
+          console.log(`       | 已暂存 ${keyStash.length} 个卸载注册表键（防 temp 安装把真安装当旧版卸载）`);
+        }
 
         // /S 静默安装；/D= 必须是最后一个参数且不带引号（NSIS 约定）
         const t0 = Date.now();
@@ -524,14 +636,46 @@ async function main() {
           : null;
         if (uninstallExe) {
           const t1 = Date.now();
-          spawnSync(uninstallExe, ['/S'], { encoding: 'utf8', windowsHide: true, timeout: 120_000 });
-          console.log(`       | 卸载完成（${Math.round((Date.now() - t1) / 1000)}s）`);
+          // _?= 让卸载器就地同步执行：不带它时 NSIS 会把卸载器复制到 %TEMP% 异步跑、
+          // 父进程 0 秒返回——子进程会在我们还原快捷方式之后才删它们，还会留下句柄竞态（EPERM）
+          const un = spawnSync(uninstallExe, ['/S', `_?=${installDir}`], { encoding: 'utf8', windowsHide: true, timeout: 120_000 });
+          console.log(
+            `       | 卸载器返回（${Math.round((Date.now() - t1) / 1000)}s，退出码=${un.status}` +
+              `${fs.existsSync(installedExe) ? '，应用文件仍有残留' : '，应用文件已移除'}）`,
+          );
+          // NSIS 卸载器可能延迟释放句柄，给它 1.5s 再清扫
+          await sleep(1500);
         }
-        fs.rmSync(installDir, { recursive: true, force: true });
-        console.log('       快捷方式已还原为安装前状态');
+        killProcessesUnder(installDir);
+        removeTreeSafe(installDir);
+        console.log('       | 临时安装目录已清理');
+        // 硬红线：本机真实安装体在整个验证过程中必须毫发无损
+        for (const realDir of realDirs) {
+          assert.ok(
+            fs.existsSync(path.join(realDir, APP_EXE_NAME)),
+            `测试破坏了真实安装体：${path.join(realDir, APP_EXE_NAME)} 已不存在（uninstallOldVersion 泄漏？）`,
+          );
+        }
+        if (realDirs.length > 0) console.log(`       真实安装体完好（${realDirs.join('; ')}）`);
       } finally {
-        if (snap) restoreShortcuts(snap, backupDir);
-        fs.rmSync(tempBase, { recursive: true, force: true });
+        // 收尾异常绝不能顶掉主流程的真实报错，也不能把已完成的判定打红
+        try {
+          restoreUninstallKeys(keyStash);
+        } catch (error) {
+          console.warn(`       ! 卸载键恢复异常（不影响判定）：${error.message}`);
+        }
+        try {
+          if (snap) restoreShortcuts(snap, backupDir);
+          console.log('       快捷方式已还原为安装前状态');
+        } catch (error) {
+          console.warn(`       ! 快捷方式还原失败（不影响判定）：${error.message}`);
+        }
+        try {
+          killProcessesUnder(tempBase);
+          removeTreeSafe(tempBase);
+        } catch (error) {
+          console.warn(`       ! 临时目录清理失败（不影响判定）：${error.message}`);
+        }
       }
     });
   }
