@@ -900,6 +900,8 @@ function initShellUpdater() {
       setBusyIndicator(false);
       refreshTrayMenu();
       log('[shell-update] 下载完成 v' + info.version);
+      // 此前完成时只改托盘菜单文字、零主动提示，用户不知道下完了——补弹窗
+      notifyShellUpdateDownloaded(info);
     });
     autoUpdater.on('error', (error) => {
       shellUpdateInProgress = false;
@@ -1016,11 +1018,25 @@ async function checkShellUpdate(options = {}) {
     }
 
     keepBusy = true;
-    autoUpdater.downloadUpdate().catch((error) => {
+    setBusyIndicator(true, `正在下载桌面端 v${info.version}…`);
+    autoUpdater.downloadUpdate().catch(async (error) => {
       shellUpdateInProgress = false;
       setBusyIndicator(false);
       refreshTrayMenu();
       log('[shell-update] 下载失败：', error.message);
+      // 此前下载失败只写日志、界面毫无动静——补失败弹窗（silent 调用不弹）
+      if (!silent) {
+        try {
+          await dialog.showMessageBox(mainWindow, {
+            type: 'warning',
+            title: '桌面端更新',
+            message: '桌面端更新下载失败',
+            detail: `${(error && error.message) || error}\n\n可稍后重试：托盘 →「检查桌面端更新」。`,
+          });
+        } catch {
+          /* ignore */
+        }
+      }
     });
     return { ok: true, status: 'downloading', version: info.version, message: `正在下载桌面端 v${info.version}…` };
   } finally {
@@ -1030,6 +1046,40 @@ async function checkShellUpdate(options = {}) {
       refreshTrayMenu();
     }
   }
+}
+
+/** 下载完成的主动提示：给「立即重启并安装 / 稍后」选择（此前零提示）。 */
+async function notifyShellUpdateDownloaded(info) {
+  try {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    const { response } = await dialog.showMessageBox(mainWindow, {
+      type: 'info',
+      buttons: ['立即重启并安装', '稍后'],
+      defaultId: 0,
+      cancelId: 1,
+      title: '桌面端更新',
+      message: `v${info.version} 下载完成`,
+      detail:
+        '点击「立即重启并安装」马上更新：会先停止本地 dsh 服务再安装，完成后应用自动重启。\n' +
+        '选择「稍后」则暂不安装，之后可从托盘「重启并安装」再装；会话与凭据存放在 ~/.dsh，不受影响。',
+    });
+    if (response === 0) await applyShellInstall(info);
+  } catch (error) {
+    log('[shell-update] 下载完成提示失败：', error.message);
+  }
+}
+
+/** 实际执行外壳安装：干净停机后交给安装器（确认对话框由调用方负责）。 */
+async function applyShellInstall(info) {
+  if (quitting) return { ok: false, status: 'busy', message: '安装已在进行中' };
+  log('[shell-update] quitAndInstall v' + info.version);
+  quitting = true;
+  // 关键顺序：先等 dsh 子进程真正退出，再让安装器接管安装目录
+  const exited = await stopHarnessAndWait();
+  log('[shell-update] dsh 子进程已退出 =', exited, '，交给安装器');
+  // 再留一点时间让 Electron 释放文件句柄，避免与安装器抢文件
+  setTimeout(() => autoUpdater.quitAndInstall(), 1500);
+  return { ok: true, status: 'installing', message: `正在安装 v${info.version}` };
 }
 
 /** 安装已下载的外壳更新（未下载时先走一次检查）。 */
@@ -1046,12 +1096,5 @@ async function installShellUpdate() {
     detail: '将先停止本地 dsh 服务再安装，安装完成后应用会自动重新启动。',
   });
   if (response !== 0) return { ok: false, status: 'postponed', message: '已暂缓；之后可从托盘「重启并安装」再装' };
-  log('[shell-update] quitAndInstall v' + info.version);
-  quitting = true;
-  // 关键顺序：先等 dsh 子进程真正退出，再让安装器接管安装目录
-  const exited = await stopHarnessAndWait();
-  log('[shell-update] dsh 子进程已退出 =', exited, '，交给安装器');
-  // 再留一点时间让 Electron 释放文件句柄，避免与安装器抢文件
-  setTimeout(() => autoUpdater.quitAndInstall(), 1500);
-  return { ok: true, status: 'installing', message: `正在安装 v${info.version}` };
+  return applyShellInstall(info);
 }
