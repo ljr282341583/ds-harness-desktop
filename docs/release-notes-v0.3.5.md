@@ -23,8 +23,8 @@
 ## 升级方式
 
 - 安装版：托盘「检查桌面端更新」自动下载安装；或从 Releases 下载
-  `DS Harness Desktop Setup 0.3.5.exe` 覆盖安装。
-- 便携版：从 Releases 重新下载 `DS Harness Desktop-0.3.5-portable.exe` 替换旧文件。
+  `DS-Harness-Desktop-Setup-0.3.5.exe` 覆盖安装。
+- 便携版：从 Releases 重新下载 `DS-Harness-Desktop-0.3.5-portable.exe` 替换旧文件。
 
 ## 已知限制
 
