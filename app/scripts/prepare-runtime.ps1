@@ -21,6 +21,20 @@ $ErrorActionPreference = 'Stop'
 
 $appDir = Split-Path -Parent $PSScriptRoot
 $runtimeDir = Join-Path $appDir 'runtime'
+$nodeExe = Join-Path $runtimeDir 'node.exe'
+$npmCli = Join-Path $runtimeDir 'node_modules\npm\bin\npm-cli.js'
+
+# 幂等快速路径：本脚本现在被 npm run build / build:dir 自动调用，
+# 侧车已是目标版本且含 npm 时必须直接就位，不能每次打包都重新下载解压 ~100MB。
+if ((Test-Path -LiteralPath $nodeExe) -and (Test-Path -LiteralPath $npmCli)) {
+    $current = "$(& $nodeExe --version)".Trim()
+    if ($current -eq $Version) {
+        Write-Host "侧车运行时已就绪：$current + 捆绑 npm（跳过下载解压）" -ForegroundColor Green
+        exit 0
+    }
+    Write-Host "侧车版本不匹配（$current ≠ $Version），重新准备…"
+}
+
 $zipPath = Join-Path $env:TEMP "node-$Version-win-x64.zip"
 # 每次解压到独立目录，避免删除既有目录导致的重入问题
 $extractDir = Join-Path $env:TEMP "node-$Version-win-x64-$(Get-Date -Format 'yyyyMMddHHmmss')"
@@ -41,8 +55,6 @@ New-Item -ItemType Directory -Force -Path (Join-Path $runtimeDir 'node_modules')
 Copy-Item -LiteralPath (Join-Path $src 'node.exe') -Destination $runtimeDir -Force
 Copy-Item -LiteralPath (Join-Path $src 'node_modules\npm') -Destination (Join-Path $runtimeDir 'node_modules\npm') -Recurse -Force
 
-$nodeExe = Join-Path $runtimeDir 'node.exe'
-$npmCli = Join-Path $runtimeDir 'node_modules\npm\bin\npm-cli.js'
 if (-not (Test-Path -LiteralPath $npmCli)) {
     throw "运行时缺少 npm：$npmCli（应用内更新需要它）"
 }

@@ -1,6 +1,6 @@
 {
   "name": "ds-harness-desktop",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "description": "DeepSeek Harness 桌面版 —— Electron 壳包裹 dsh web",
   "main": "src/main.js",
   "private": true,
@@ -8,8 +8,8 @@
   "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "build": "electron-builder --win && node test/smoke.test.js --packaged",
-    "build:dir": "electron-builder --dir && node test/smoke.test.js --packaged",
+    "build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\prepare-runtime.ps1 && electron-builder --win && node test/smoke.test.js --packaged",
+    "build:dir": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\prepare-runtime.ps1 && electron-builder --dir && node test/smoke.test.js --packaged",
     "test": "node test/updater.test.js",
     "test:e2e": "node test/updater.test.js --e2e",
     "verify:smoke": "node test/smoke.test.js"

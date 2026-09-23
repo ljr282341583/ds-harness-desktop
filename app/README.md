@@ -64,11 +64,14 @@ dsh 本体（不重打包），以及外壳自身更新（electron-updater + Git
    > 只投放 `node.exe` 的旧运行时会让更新提示「当前构建未捆绑 npm」。
    > 产物约 100 MB，其中 node.exe 约 92 MB、npm 约 7 MB。
 
+   > `npm run build` / `build:dir` 已自动先跑本脚本（幂等：侧车已就绪直接跳过，
+   > 缺失或版本不符才下载补齐）；此处手动执行只为 `npm start` 开发运行做准备。
+
 ## 运行
 
 ```sh
 npm start          # 开发运行
-npm run build      # 打包 NSIS 安装器 + portable exe（产物在 ../产出）
+npm run build      # 打包 NSIS 安装器 + portable exe（自动先备侧车运行时；产物在 ../产出）
 npm test           # 更新器离线单元测试（无网络）
 npm run test:e2e   # 追加真实端到端：下载安装 rc.2 + 冒烟验证 + 激活 + 回滚
 ```

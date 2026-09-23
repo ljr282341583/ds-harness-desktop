@@ -12,8 +12,9 @@
  *
  * 步骤：
  *   [1] 离线单测：复用 test/updater.test.js（版本比较 / 通道 / 守卫 / 状态 / 环境收敛）
- *   [2] 静态检查：侧车 Node ≥ 22、内置 dsh 版本与声明精确一致（无 ^）、
- *       compression: none 两处守卫都在位
+ *   [2] 静态检查：侧车 Node ≥ 22、侧车含可执行 npm（应用内 dsh 更新的前提，
+ *       CI 发布物由 release.yml 保证、本地由打包钩子 prepare-runtime.ps1 保证）、
+ *       内置 dsh 版本与声明精确一致（无 ^）、compression: none 两处守卫都在位
  *   [3] 侧车启动冒烟：runtime/node.exe 拉起内置 dsh web，临时 DSH_HOME，
  *       等到带 token 的启动地址（复用 updater.smokeTest，与更新器同一套判定）
  *   [4] 打包产物启动冒烟：无窗口拉起 产出/win-unpacked 的 exe，等端口真正监听
@@ -486,6 +487,20 @@ async function main() {
     const major = Number(version.replace(/^v/, '').split('.')[0]);
     assert.ok(major >= 22, `侧车 Node 版本过低：${version}（需要 ≥ 22）`);
     console.log(`       侧车 ${version}`);
+  });
+
+  await step('侧车含可执行 npm（应用内「检查 dsh 更新」的前提，防 prepare-runtime 被绕过）', () => {
+    assert.ok(fs.existsSync(nodeExe), `缺少 ${nodeExe}`);
+    const npmCli = path.join(appDir, 'runtime', 'node_modules', 'npm', 'bin', 'npm-cli.js');
+    assert.ok(
+      fs.existsSync(npmCli),
+      `侧车缺少 ${npmCli} —— 打包前须经 scripts/prepare-runtime.ps1（npm run build 已自动挂钩；CI 由 release.yml 保证）`,
+    );
+    const r = spawnSync(nodeExe, [npmCli, '--version'], { encoding: 'utf8', windowsHide: true });
+    assert.equal(r.status, 0, `侧车 npm 不可执行（exit=${r.status}）：${(r.stderr || '').trim()}`);
+    const npmVersion = String(r.stdout || '').trim();
+    assert.ok(/^\d+\./.test(npmVersion), `npm --version 输出异常：${npmVersion || '（空）'}`);
+    console.log(`       侧车 npm ${npmVersion}`);
   });
 
   await step('内置 dsh 版本与 package.json 声明精确一致（依赖不带 ^）', () => {
