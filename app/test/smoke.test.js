@@ -271,9 +271,21 @@ function shortcutTargets() {
     'Programs',
     path.join(process.env.APPDATA || '', 'Microsoft', 'Windows', 'Start Menu', 'Programs'),
   );
+  // 全机安装的图标在公共桌面 + 所有用户开始菜单（2026-09-24 事故：真卸载器删的是这两处，
+  // 只备份用户级位置的"还原"根本找不回来）。
+  const publicDesktop = path.join(process.env.PUBLIC || 'C:\\Users\\Public', 'Desktop');
+  const commonPrograms = path.join(
+    process.env.ProgramData || 'C:\\ProgramData',
+    'Microsoft',
+    'Windows',
+    'Start Menu',
+    'Programs',
+  );
   return [
     { id: 'desktop', file: path.join(desktop, `${SHORTCUT_NAME}.lnk`), dir: null },
     { id: 'startmenu', file: path.join(programs, `${SHORTCUT_NAME}.lnk`), dir: path.join(programs, SHORTCUT_NAME) },
+    { id: 'public-desktop', file: path.join(publicDesktop, `${SHORTCUT_NAME}.lnk`), dir: null },
+    { id: 'common-startmenu', file: path.join(commonPrograms, `${SHORTCUT_NAME}.lnk`), dir: path.join(commonPrograms, SHORTCUT_NAME) },
   ];
 }
 
@@ -402,46 +414,66 @@ function removeTreeSafe(root) {
  *
  * NSIS 安装器的 uninstallOldVersion 宏（installSection.nsh）会按注册表找到"旧安装"
  * 并先静默跑它的卸载器——temp 验证安装若不先藏起这些键，会把用户的真实安装整个
- * 当旧版卸掉（本项目实测踩过：真实目录被清空、快捷方式被删）。
+ * 当旧版卸掉（本项目实测踩过：真实目录被清空、快捷方式被删）。2026-09-24 二次复发：
+ * 全机安装的键在 HKLM，旧实现只扫 HKCU 暂存扑空，真卸载器清空了 D:\ 安装与公共图标
+ * ——现在三个 hive 全扫，任何"该藏的没藏住"（导出失败/删除失败=大概率未提权）一律
+ * 抛错中止（fail-closed），绝不带病运行安装器。
  * 同时返回真实安装目录，供最后断言"真安装体未被测试破坏"。
  */
-function stashUninstallKeys(backupDir) {
+// entries 直接写入调用方数组：中途抛错时调用方 finally 仍持有一份，能把已藏的键导回。
+function stashUninstallKeys(backupDir, entries) {
   fs.mkdirSync(backupDir, { recursive: true });
-  const root = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall';
-  const entries = [];
+  const roots = [
+    'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+    'HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+    'HKLM\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+  ];
   const realDirs = [];
-  const q = spawnSync('reg', ['query', root], { encoding: 'utf8', windowsHide: true });
-  const subKeys = String(q.stdout || '')
-    .split(/\r?\n/)
-    .map((line) => (line.match(/HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\(\S+)$/) || [])[1])
-    .filter(Boolean);
-  for (const name of subKeys) {
-    const key = `${root}\\${name}`;
-    const dn = spawnSync('reg', ['query', key, '/v', 'DisplayName'], { encoding: 'utf8', windowsHide: true });
-    if (!/DS Harness Desktop/i.test(String(dn.stdout || ''))) continue;
-    const file = path.join(backupDir, `regkey-${entries.length}.reg`);
-    const ex = spawnSync('reg', ['export', key, file, '/y'], { encoding: 'utf8', windowsHide: true });
-    if (ex.status !== 0 || !fs.existsSync(file)) continue;
-    // 推断真实安装目录：优先 InstallLocation，退化到 UninstallString 的引号内路径
-    //（UninstallString 形如 `"C:\path\Uninstall DS Harness Desktop.exe" /currentuser`，
-    //  末尾带 /currentuser，不能用行尾锚点匹配）
-    const loc = spawnSync('reg', ['query', key, '/v', 'InstallLocation'], { encoding: 'utf8', windowsHide: true });
-    const ul = spawnSync('reg', ['query', key, '/v', 'UninstallString'], { encoding: 'utf8', windowsHide: true });
-    const locM = String(loc.stdout || '').match(/InstallLocation\s+REG_\w+\s+(.+)$/m);
-    const ulM =
-      String(ul.stdout || '').match(/UninstallString\s+REG_\w+\s+"([^"]+)"/) ||
-      String(ul.stdout || '').match(/UninstallString\s+REG_\w+\s+(\S+)/);
-    const dir = locM && locM[1].trim()
-      ? locM[1].trim()
-      : ulM
-        ? path.dirname(ulM[1].trim().replace(/^"|"$/g, ''))
-        : null;
-    if (dir && fs.existsSync(path.join(dir, APP_EXE_NAME))) realDirs.push(dir);
-    spawnSync('reg', ['delete', key, '/f'], { encoding: 'utf8', windowsHide: true });
-    entries.push({ key, file });
-    console.log(`       | 暂存卸载键 ${name}${dir ? `（真实安装 ${dir}）` : ''}`);
+  for (const root of roots) {
+    const prefix = root.replace(/^HKCU/, 'HKEY_CURRENT_USER').replace(/^HKLM/, 'HKEY_LOCAL_MACHINE');
+    const q = spawnSync('reg', ['query', root], { encoding: 'utf8', windowsHide: true });
+    const subKeys = String(q.stdout || '')
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith(`${prefix}\\`))
+      .map((line) => line.slice(prefix.length + 1))
+      .filter((name) => name && !name.includes('\\'));
+    for (const name of subKeys) {
+      const key = `${root}\\${name}`;
+      const dn = spawnSync('reg', ['query', key, '/v', 'DisplayName'], { encoding: 'utf8', windowsHide: true });
+      if (!/DS Harness Desktop/i.test(String(dn.stdout || ''))) continue;
+      const file = path.join(backupDir, `regkey-${entries.length}.reg`);
+      const ex = spawnSync('reg', ['export', key, file, '/y'], { encoding: 'utf8', windowsHide: true });
+      if (ex.status !== 0 || !fs.existsSync(file)) {
+        throw new Error(`卸载键 ${key} 匹配成功但导出失败——无法安全暂存，中止（否则安装器会把真安装当旧版卸掉）`);
+      }
+      // 推断真实安装目录：优先 InstallLocation，退化到 UninstallString 的引号内路径
+      //（UninstallString 形如 `"C:\path\Uninstall DS Harness Desktop.exe" /currentuser`，
+      //  末尾带 /currentuser，不能用行尾锚点匹配）
+      const loc = spawnSync('reg', ['query', key, '/v', 'InstallLocation'], { encoding: 'utf8', windowsHide: true });
+      const ul = spawnSync('reg', ['query', key, '/v', 'UninstallString'], { encoding: 'utf8', windowsHide: true });
+      const locM = String(loc.stdout || '').match(/InstallLocation\s+REG_\w+\s+(.+)$/m);
+      const ulM =
+        String(ul.stdout || '').match(/UninstallString\s+REG_\w+\s+"([^"]+)"/) ||
+        String(ul.stdout || '').match(/UninstallString\s+REG_\w+\s+(\S+)/);
+      const dir = locM && locM[1].trim()
+        ? locM[1].trim()
+        : ulM
+          ? path.dirname(ulM[1].trim().replace(/^"|"$/g, ''))
+          : null;
+      if (dir && fs.existsSync(path.join(dir, APP_EXE_NAME))) realDirs.push(dir);
+      const del = spawnSync('reg', ['delete', key, '/f'], { encoding: 'utf8', windowsHide: true });
+      if (del.status !== 0) {
+        throw new Error(
+          `无法删除卸载键 ${key}（大概率未提权）：${String(del.stderr || del.stdout || '').trim()}` +
+            '——继续运行会让安装器把真实安装当旧版卸掉，中止',
+        );
+      }
+      entries.push({ key, file });
+      console.log(`       | 暂存卸载键 ${key}${dir ? `（真实安装 ${dir}）` : ''}`);
+    }
   }
-  return { entries, realDirs };
+  return realDirs;
 }
 
 /** 把暂存的卸载注册表键原样导回（temp 安装会占用同名键，必须恢复原内容）。 */
@@ -609,11 +641,13 @@ async function main() {
       try {
         console.log(`       | 安装包 ${path.basename(installer)}`);
         snap = snapshotShortcuts(backupDir);
-        const keyInfo = stashUninstallKeys(backupDir);
-        keyStash = keyInfo.entries;
-        realDirs.push(...keyInfo.realDirs);
+        // entries 用调用方数组逐步写入：中途抛错时 finally 仍能把已藏的键导回
+        const stashedRealDirs = stashUninstallKeys(backupDir, keyStash);
+        realDirs.push(...stashedRealDirs);
         if (keyStash.length > 0) {
           console.log(`       | 已暂存 ${keyStash.length} 个卸载注册表键（防 temp 安装把真安装当旧版卸载）`);
+        } else {
+          console.log('       | 未发现本机已登记的卸载键（全新环境）');
         }
 
         // /S 静默安装；/D= 必须是最后一个参数且不带引号（NSIS 约定）
