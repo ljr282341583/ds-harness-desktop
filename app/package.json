@@ -12,7 +12,8 @@
     "build:dir": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\prepare-runtime.ps1 && electron-builder --dir && node test/smoke.test.js --packaged",
     "test": "node test/updater.test.js",
     "test:e2e": "node test/updater.test.js --e2e",
-    "verify:smoke": "node test/smoke.test.js"
+    "verify:smoke": "node test/smoke.test.js",
+    "build:smoketest": "node scripts/build-smoketest.js"
   },
   "dependencies": {
     "@deepseek-ai/dsh": "0.1.5-rc.1",

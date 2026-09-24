@@ -29,6 +29,8 @@
  *       temp 安装一律带 `/currentuser`（模板 assistedInstaller.nsh L129-133 支持该参数）：
  *       强制落在每用户命名空间（HKCU + 用户级快捷方式），不写公共桌面/HKLM，从接触面上
  *       隔离真实安装；安装后打印它实际注册到哪个 hive，隔离是否成立当场可见。
+ *       若存在 `npm run build:smoketest` 的「隔离命名」构建（产出\smoketest\ + 清单），[5]
+ *       优先用它：exe 名/进程名/快捷方式名/注册表键名与真实安装完全不重叠，隔离彻底。
  *       本机有正在运行的 DS Harness Desktop 实例 → SKIP：NSIS 模板会
  *       `taskkill /im <exe>` 按进程名全杀，会连坐用户正在用的窗口。
  *
@@ -58,8 +60,31 @@ const repoDir = path.join(appDir, '..');
 const outDir = path.join(repoDir, '产出');
 const packedDir = path.join(outDir, 'win-unpacked');
 const requirePackaged = process.argv.includes('--packaged');
-const APP_EXE_NAME = 'DS Harness Desktop.exe';
-const SHORTCUT_NAME = 'DS Harness Desktop';
+const REAL_APP_EXE_NAME = 'DS Harness Desktop.exe';
+const REAL_SHORTCUT_NAME = 'DS Harness Desktop';
+const smoketestDir = path.join(outDir, 'smoketest');
+const smoketestManifestPath = path.join(smoketestDir, 'smoketest.json');
+
+// 若存在「隔离命名」体检构建（npm run build:smoketest 的产物 + 清单），[5] 优先使用它：
+// 它的 exe 名、进程名、快捷方式名、注册表键名都与真实安装不同——隔离不再依赖"事后还原"。
+// （NSIS 的 lnk 名与注册表键名由产品名/GUID 派生、与安装目录无关；2026-09-24 事故根因）
+let ISOLATED_BUILD = false;
+let APP_EXE_NAME = REAL_APP_EXE_NAME;
+let SHORTCUT_NAME = REAL_SHORTCUT_NAME;
+let SMOKETEST_GUID = null;
+try {
+  if (fs.existsSync(smoketestManifestPath)) {
+    const manifest = JSON.parse(fs.readFileSync(smoketestManifestPath, 'utf8'));
+    if (manifest && typeof manifest.exeName === 'string' && typeof manifest.productName === 'string') {
+      ISOLATED_BUILD = true;
+      APP_EXE_NAME = manifest.exeName;
+      SHORTCUT_NAME = manifest.productName;
+      SMOKETEST_GUID = typeof manifest.guid === 'string' ? manifest.guid : null;
+    }
+  }
+} catch {
+  ISOLATED_BUILD = false;
+}
 
 let passed = 0;
 let failed = 0;
@@ -359,13 +384,14 @@ function restoreShortcuts(snap, backupDir) {
   return failures;
 }
 
-/** 产出\ 下最新的 NSIS 安装包（*Setup*.exe）。 */
+/** 体检用 NSIS 安装包：隔离构建优先（产出\smoketest\），否则 产出\ 下最新的 *Setup*.exe。 */
 function newestInstaller() {
-  if (!fs.existsSync(outDir)) return null;
+  const scanDir = ISOLATED_BUILD ? smoketestDir : outDir;
+  if (!fs.existsSync(scanDir)) return null;
   const candidates = fs
-    .readdirSync(outDir)
+    .readdirSync(scanDir)
     .filter((name) => /Setup.*\.exe$/i.test(name))
-    .map((name) => path.join(outDir, name))
+    .map((name) => path.join(scanDir, name))
     .filter((file) => fs.statSync(file).isFile());
   if (candidates.length === 0) return null;
   candidates.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
@@ -380,7 +406,7 @@ function newestInstaller() {
  * 正在用的正式实例（承载当前会话的窗口）连坐杀掉。
  */
 function countForeignInstances() {
-  const r = spawnSync('tasklist', ['/FI', 'IMAGENAME eq DS Harness Desktop.exe', '/FO', 'CSV', '/NH'], {
+  const r = spawnSync('tasklist', ['/FI', `IMAGENAME eq ${APP_EXE_NAME}`, '/FO', 'CSV', '/NH'], {
     encoding: 'utf8',
     windowsHide: true,
   });
@@ -445,13 +471,8 @@ function removeTreeSafe(root) {
 // entries 直接写入调用方数组：中途抛错时调用方 finally 仍持有一份，能把已藏的键导回。
 function stashUninstallKeys(backupDir, entries) {
   fs.mkdirSync(backupDir, { recursive: true });
-  const roots = [
-    'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
-    'HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
-    'HKLM\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
-  ];
   const realDirs = [];
-  for (const root of roots) {
+  for (const root of UNINSTALL_ROOTS) {
     const prefix = root.replace(/^HKCU/, 'HKEY_CURRENT_USER').replace(/^HKLM/, 'HKEY_LOCAL_MACHINE');
     const q = spawnSync('reg', ['query', root], { encoding: 'utf8', windowsHide: true });
     const subKeys = String(q.stdout || '')
@@ -525,6 +546,47 @@ function restoreUninstallKeys(entries) {
       if (r.status !== 0) console.warn(`       ! 卸载键恢复失败 ${e.key}：${String(r.stderr || '').trim()}`);
     }
   }
+}
+
+/** 三个卸载键 hive（全覆盖 uninstallOldVersion 可能读到的注册表视图）。 */
+const UNINSTALL_ROOTS = [
+  'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+  'HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+  'HKLM\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+];
+
+/** 按固定 GUID 精确查找卸载键（核对"上次体检残留"用，不依赖显示名）。 */
+function findKeysByGuid(guid) {
+  const hits = [];
+  for (const root of UNINSTALL_ROOTS) {
+    const key = `${root}\\${guid}`;
+    const q = spawnSync('reg', ['query', key], { encoding: 'utf8', windowsHide: true });
+    if (q.status === 0) hits.push(key);
+  }
+  return hits;
+}
+
+/** 真实安装（固定真实产品名）的四处快捷方式路径——隔离模式下核对"真的没被碰"。 */
+function realShortcutFiles() {
+  const desktop = shellFolder('Desktop', path.join(process.env.USERPROFILE || '', 'Desktop'));
+  const programs = shellFolder(
+    'Programs',
+    path.join(process.env.APPDATA || '', 'Microsoft', 'Windows', 'Start Menu', 'Programs'),
+  );
+  const publicDesktop = path.join(process.env.PUBLIC || 'C:\\Users\\Public', 'Desktop');
+  const commonPrograms = path.join(
+    process.env.ProgramData || 'C:\\ProgramData',
+    'Microsoft',
+    'Windows',
+    'Start Menu',
+    'Programs',
+  );
+  return [
+    path.join(desktop, `${REAL_SHORTCUT_NAME}.lnk`),
+    path.join(programs, REAL_SHORTCUT_NAME, `${REAL_SHORTCUT_NAME}.lnk`),
+    path.join(publicDesktop, `${REAL_SHORTCUT_NAME}.lnk`),
+    path.join(commonPrograms, REAL_SHORTCUT_NAME, `${REAL_SHORTCUT_NAME}.lnk`),
+  ];
 }
 
 // ---------------------------------------------------------------------------
@@ -804,7 +866,7 @@ async function main() {
   console.log('\n[5] 安装器端到端（静默安装 → 启动监听 → 卸载还原）');
   // -------------------------------------------------------------------------
   const installer = newestInstaller();
-  const packedExePath = exePath || path.join(packedDir, APP_EXE_NAME);
+  const packedExePath = exePath || path.join(packedDir, REAL_APP_EXE_NAME);
   const foreignCount = countForeignInstances();
   const forceInstaller = process.argv.includes('--force-installer');
 
@@ -815,17 +877,20 @@ async function main() {
   const localInstallKeys = findVisibleUninstallKeys();
   const localInstallCount = localInstallKeys === null ? null : localInstallKeys.length;
 
-  if (!forceInstaller && localInstallCount === null) {
+  // 隔离构建（productName/shortcut/guid 已换）没有"撞上真实安装"的风险，因此不套用下面
+  // 两条"本机存在真实安装就跳过"的理由；其余守卫（运行实例/安装包缺失/过期）照常生效。
+  if (!ISOLATED_BUILD && !forceInstaller && localInstallCount === null) {
     skipStep(
       '安装器端到端',
       '无法确认本机是否已有该应用的真实安装（注册表扫描失败）——默认不跑破坏性步骤；确认环境干净后加 --force-installer',
     );
-  } else if (!forceInstaller && localInstallCount > 0) {
+  } else if (!ISOLATED_BUILD && !forceInstaller && localInstallCount > 0) {
     skipStep(
       '安装器端到端',
       `本机存在真实安装（${localInstallCount} 个已登记卸载键，如 ${localInstallKeys[0]}）——` +
         'NSIS 快捷方式/注册表命名空间由产品名/GUID 派生、与安装目录无关，"装到临时目录"隔离不了它；' +
-        '发版门禁由 CI（干净机器）承担；确要在本机跑请加 --force-installer（暂存/复查/快照还原护栏会启用）',
+        '发版门禁由 CI（干净机器）承担；或先 `npm run build:smoketest` 用「隔离命名」构建体检；' +
+        '确要用真实安装包在本机跑请加 --force-installer（暂存/复查/快照还原护栏会启用）',
     );
   } else if (foreignCount > 0 && !forceInstaller) {
     skipStep(
@@ -837,6 +902,12 @@ async function main() {
   } else if (fs.existsSync(packedExePath) && fs.statSync(installer).mtimeMs < fs.statSync(packedExePath).mtimeMs) {
     skipStep('安装器端到端', `安装包比当前 win-unpacked 旧（${path.basename(installer)}），先 npm run build 再验证`);
   } else {
+    if (ISOLATED_BUILD) {
+      console.log(
+        '       体检使用「隔离命名」构建（productName/shortcut/guid 已换）——exe 名、进程名、' +
+          '快捷方式名、注册表键名与真实安装都不重叠，无需暂存、无需提权',
+      );
+    }
     if (forceInstaller && localInstallCount > 0) {
       console.warn(
         `       ! --force-installer 已生效：本机存在真实安装（${localInstallCount} 个卸载键），` +
@@ -851,6 +922,7 @@ async function main() {
       let keyStash = [];
       const realDirs = [];
       let baselineKeys = null;
+      let realShortcutsBefore = null;
       let bodyError = null;
       const shortcutFailures = [];
       try {
@@ -861,20 +933,33 @@ async function main() {
         if (baselineKeys === null) {
           throw new Error('安装前基线扫描失败（PowerShell 无输出）——fail-closed 中止');
         }
-        // entries 用调用方数组逐步写入：中途抛错时 finally 仍能把已藏的键导回
-        const stashedRealDirs = stashUninstallKeys(backupDir, keyStash);
-        realDirs.push(...stashedRealDirs);
-        if (keyStash.length > 0) {
-          console.log(`       | 已暂存 ${keyStash.length} 个卸载注册表键（防 temp 安装把真安装当旧版卸载）`);
-          console.log(
-            `       | 中断恢复：若本次运行被强制中断，对 ${backupDir} 下每个 .reg 执行 reg import 即可复原`,
-          );
-        } else {
-          console.log('       | 未发现本机已登记的卸载键（全新环境）');
-        }
+        // 隔离模式：记录真实安装快捷方式当前在位的清单，跑完逐项核对（它们不该有任何变化）
+        realShortcutsBefore = ISOLATED_BUILD ? realShortcutFiles().filter((file) => fs.existsSync(file)) : null;
 
-        // 硬闸（fail-closed）：以独立实现复查，只要还能读到本机卸载键就绝不启动安装器
-        assertNoVisibleUninstallKeys('安装前');
+        if (ISOLATED_BUILD) {
+          // 隔离构建：真实安装的键/快捷方式/进程名都撞不上，无需暂存（也就不需要提权）；
+          // 只核对"上次体检残留"——残留会被它自己的卸载器清理，安全。
+          const leftovers = SMOKETEST_GUID ? findKeysByGuid(SMOKETEST_GUID) : [];
+          if (leftovers.length > 0) {
+            console.warn(`       ! 发现上次体检残留（${leftovers.join('、')}）——由本次安装/卸载自行清理，安全`);
+          }
+          console.log('       | 隔离构建：跳过真实安装键暂存（结构上不可能被触碰），改为跑前跑后逐项核对键清单');
+        } else {
+          // entries 用调用方数组逐步写入：中途抛错时 finally 仍能把已藏的键导回
+          const stashedRealDirs = stashUninstallKeys(backupDir, keyStash);
+          realDirs.push(...stashedRealDirs);
+          if (keyStash.length > 0) {
+            console.log(`       | 已暂存 ${keyStash.length} 个卸载注册表键（防 temp 安装把真安装当旧版卸载）`);
+            console.log(
+              `       | 中断恢复：若本次运行被强制中断，对 ${backupDir} 下每个 .reg 执行 reg import 即可复原`,
+            );
+          } else {
+            console.log('       | 未发现本机已登记的卸载键（全新环境）');
+          }
+
+          // 硬闸（fail-closed）：以独立实现复查，只要还能读到本机卸载键就绝不启动安装器
+          assertNoVisibleUninstallKeys('安装前');
+        }
 
         // /S 静默安装；/currentuser 强制每用户命名空间（不碰公共桌面/HKLM，隔离真实安装）；
         // /D= 必须是最后一个参数且不带引号（NSIS 约定）
@@ -895,16 +980,20 @@ async function main() {
         assert.ok(fs.existsSync(installedExe), `安装完成但缺少 ${installedExe}`);
         console.log(`       | 安装完成（${installSecs}s）→ ${installDir}`);
 
-        // 观测 temp 实例把自己登记到哪个命名空间——/currentuser 的隔离要"看得见"才算数
-        const tempRegistrations = findVisibleUninstallKeys();
-        if (tempRegistrations === null) {
+        // 观测 temp 实例把自己登记到哪个命名空间——/currentuser 的隔离要"看得见"才算数。
+        // 隔离构建下真实安装的键本来就可见（我们有意不暂存它），所以必须按**本次构建自己的
+        // GUID** 判定；按产品名匹配会把真实安装的 HKLM 键误报成"隔离失效"。
+        const ownRegistrations = ISOLATED_BUILD && SMOKETEST_GUID
+          ? findKeysByGuid(SMOKETEST_GUID)
+          : findVisibleUninstallKeys();
+        if (ownRegistrations === null) {
           console.warn('       ! temp 实例注册位置未知（扫描失败）——请人工确认它没写 HKLM');
-        } else if (tempRegistrations.length === 0) {
+        } else if (ownRegistrations.length === 0) {
           console.warn('       ! temp 实例未登记卸载键（静默安装可能未注册；继续，但请留意）');
         } else {
-          const inMachine = tempRegistrations.filter((k) => k.startsWith('HKLM'));
+          const inMachine = ownRegistrations.filter((k) => k.startsWith('HKLM'));
           console.log(
-            `       | temp 实例注册于 ${tempRegistrations.join('、')}` +
+            `       | temp 实例注册于 ${ownRegistrations.join('、')}` +
               (inMachine.length > 0 ? '  ⚠ 含 HKLM（每用户隔离未生效！）' : '  ✓ 仅 HKCU（每用户命名空间）'),
           );
         }
@@ -942,8 +1031,8 @@ async function main() {
         // 硬红线：本机真实安装体在整个验证过程中必须毫发无损
         for (const realDir of realDirs) {
           assert.ok(
-            fs.existsSync(path.join(realDir, APP_EXE_NAME)),
-            `测试破坏了真实安装体：${path.join(realDir, APP_EXE_NAME)} 已不存在（uninstallOldVersion 泄漏？）`,
+            fs.existsSync(path.join(realDir, REAL_APP_EXE_NAME)),
+            `测试破坏了真实安装体：${path.join(realDir, REAL_APP_EXE_NAME)} 已不存在（uninstallOldVersion 泄漏？）`,
           );
         }
         if (realDirs.length > 0) console.log(`       真实安装体完好（${realDirs.join('; ')}）`);
@@ -981,12 +1070,20 @@ async function main() {
           shortcutFailures.push('收尾复查扫描失败（无法确认本机卸载键已还原）');
         } else if (baselineKeys === null) {
           console.log(`       收尾复查：本机卸载键可见 ${afterKeys.length} 个（基线缺失，未作比较）`);
-        } else if (afterKeys.length !== baselineKeys.length) {
+        } else if (JSON.stringify([...afterKeys].sort()) !== JSON.stringify([...baselineKeys].sort())) {
           shortcutFailures.push(
-            `本机卸载键未回到基线（跑前 ${baselineKeys.length} 个，跑后 ${afterKeys.length} 个）`,
+            `本机卸载键清单与基线不一致（跑前 ${baselineKeys.length} 个 → 跑后 ${afterKeys.length} 个）`,
           );
         } else {
-          console.log(`       收尾复查通过：本机卸载键回到基线 ${afterKeys.length} 个`);
+          console.log(`       收尾复查通过：本机卸载键清单与基线完全一致（${afterKeys.length} 个）`);
+        }
+        if (realShortcutsBefore) {
+          const missing = realShortcutsBefore.filter((file) => !fs.existsSync(file));
+          if (missing.length > 0) {
+            shortcutFailures.push(`真实安装的快捷方式被动了：${missing.join('、')}`);
+          } else {
+            console.log(`       真实安装快捷方式核对通过：${realShortcutsBefore.length} 项均在位（隔离生效）`);
+          }
         }
         try {
           killProcessesUnder(tempBase);
