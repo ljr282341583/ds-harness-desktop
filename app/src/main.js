@@ -478,6 +478,11 @@ async function startHarness() {
         /* ignore */
       }
     }
+    // 陈旧子进程的退出事件（stopHarness 杀掉的旧实例）不是当前实例的失败 → 忽略。
+    // 否则更新流程「先 activate 再 stopHarness」会让旧进程的退出被误判为
+    // 「覆盖版本启动失败」，当场 deactivate 掉刚激活的新版本（2026-09-24 实锤：
+    // 旧进程 SIGTERM 退出后 1ms 就触发回退，覆盖版本从未被拉起过一次）。
+    if (dshChild !== child) return;
     dshChild = null;
     log('dsh child exited: code=', code, 'signal=', signal, 'quitting=', quitting);
     if (quitting) return;

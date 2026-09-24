@@ -112,8 +112,8 @@
 **发布新版本**：
 
 ```sh
-git tag -a v0.3.6 -m "v0.3.6 变更说明（此注释会成为 Release 正文）"
-git push origin v0.3.6
+git tag -a v0.3.7 -m "v0.3.7 变更说明（此注释会成为 Release 正文）"
+git push origin v0.3.7
 ```
 
 GitHub Actions（`.github/workflows/release.yml`）会同步版本号、安装依赖、准备 Node 24 侧车（含 npm）、跑更新器单测，然后打包发布到 Releases：NSIS 安装器 + blockmap + 便携版 + `latest.yml`（**连字符**文件名，与更新清单一致），并把 tag 注释写成 Release 说明。
@@ -141,7 +141,7 @@ GitHub Actions（`.github/workflows/release.yml`）会同步版本号、安装�
 - 项目名称：DS Harness Desktop（ds-harness-desktop）
 - 创建日期：2026-08-14
 - 项目目标：为 DeepSeek Harness（`@deepseek-ai/dsh`，Node.js + Cordis 插件化 Agent Harness）提供一个桌面端形态。DSH 以 `dsh web` 启动本地 Web 服务器（webserver + 前端静态资源 + apiproxy），桌面版把这套能力装进原生窗口，并保留完整工具链。
-- 当前状态：v0.3.5 已发布（NSIS 安装器 + portable 便携版；两层更新、打 tag 自动发版流水线与真机自更新均已实测验证；更新反馈三件套与打包体检源码就绪，随 0.3.6 生效）
+- 当前状态：v0.3.7 已发布（NSIS 安装器 + portable 便携版；两层更新、打 tag 自动发版流水线与真机自更新均已实测验证；应用内 dsh 更新「激活后秒回退」缺陷已修复）
 - 验收标准：见 `docs\设计方案.md` 第 6 节
 
 ## 变更记录
@@ -163,3 +163,5 @@ GitHub Actions（`.github/workflows/release.yml`）会同步版本号、安装�
 | 2026-09-13 | 发布 v0.3.4：**安装包瘦身，装得更快** —— 打包时不再把开发态 node_modules 整个塞进去（那会把整套 Electron 构建工具链、260 个包、上万文件发给用户），改用 `npm ci --omit=dev` 生成运行时依赖树并修剪 sourcemap 与 `.d.ts`。安装包 213 MB → **130 MB**，安装后 811 MB/3.4 万文件 → **462 MB/1.3 万文件** |
 | 2026-09-23 | 发布 v0.3.5：发版流水线整条走通——打 tag 触发 CI 十步全绿，正式 Release 四资产（Setup / blockmap / portable / latest.yml，连字符名与更新清单一致）；真机完成 0.3.4→0.3.5 自更新全链路验证（发现 → 下载 → 安装 → 自动重启，`~/.dsh` 无损）；核对「本地产物名带空格、Releases 连字符」是同一文件；确认 `prepare-runtime.ps1` 本就是官方脚本、发布物侧车含 npm（文档据实纠偏） |
 | 2026-09-23 | 源码就绪（待 0.3.6 生效）：更新反馈三件套——下载完成弹窗「立即重启并安装」、下载失败弹窗、下载中「正在下载桌面端 vX…」文案；`npm run build` 挂 `verify:smoke` 冒烟体检（失败 0 即全绿，[5] 安装器端到端检测到正式实例自动跳过防误杀） |
+| 2026-09-23 | 发布 v0.3.6：更新反馈三件套生效（下载完成「立即重启并安装」/ 下载失败弹窗 / 下载中「正在下载桌面端 vX…」文案）；本地产物侧车含可执行 npm，应用内「检查 dsh 更新」恢复可用 |
+| 2026-09-25 | 发布 v0.3.7：**修复应用内「检查 dsh 更新」的覆盖版本从未真正生效**——`child.on('exit')` 不区分退出的是哪个子进程，旧进程退出被误判为「覆盖版本启动失败」，激活后 1ms 即回退内置版（09-12、09-20×2、09-24 共 4 次尝试全部同因失败）；加子进程身份守卫后实机验证托盘「重启服务」不再回退 |
