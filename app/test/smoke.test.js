@@ -22,9 +22,15 @@
  *       且进程仍存活 —— 最接近「更新完还打得开吗」的一步
  *   [5] 安装器端到端：NSIS 安装包静默装进临时目录 → 启动 → 端口监听 → 卸载还原。
  *       安装包缺失或比 win-unpacked 旧 → SKIP（build:dir 不产安装包，用 npm run build）。
+ *       本机存在真实安装（注册表三 hive 里有该应用的卸载键）→ **默认 SKIP**：NSIS 的
+ *       快捷方式路径与注册表键名由产品名/GUID 派生、与安装目录无关，"装到临时目录"
+ *       隔离不了这些命名空间（2026-09-24 事故的设计级根因）；发版门禁交给 CI（干净机器，
+ *       无物可毁）。确要在本机跑必须显式 --force-installer，届时暂存/复查/还原护栏生效。
+ *       temp 安装一律带 `/currentuser`（模板 assistedInstaller.nsh L129-133 支持该参数）：
+ *       强制落在每用户命名空间（HKCU + 用户级快捷方式），不写公共桌面/HKLM，从接触面上
+ *       隔离真实安装；安装后打印它实际注册到哪个 hive，隔离是否成立当场可见。
  *       本机有正在运行的 DS Harness Desktop 实例 → SKIP：NSIS 模板会
- *       `taskkill /im <exe>` 按进程名全杀，会连坐用户正在用的窗口；
- *       确认可牺牲时可加 --force-installer 强行执行。
+ *       `taskkill /im <exe>` 按进程名全杀，会连坐用户正在用的窗口。
  *
  * 硬约束：
  *   - 全程 DSH_HOME / userData / cwd 指向临时目录，不触碰真实 ~/.dsh 与真实安装状态
@@ -802,7 +808,26 @@ async function main() {
   const foreignCount = countForeignInstances();
   const forceInstaller = process.argv.includes('--force-installer');
 
-  if (foreignCount > 0 && !forceInstaller) {
+  // 第一优先守卫：本机已有真实安装 → 默认跳过（2026-09-24 事故的设计级根因——
+  // NSIS 的快捷方式路径与注册表键名由产品名/GUID 派生、与安装目录无关，"装到临时目录"
+  // 隔离不了这些命名空间；全机模式下安装器还会去执行真实安装的卸载器）。
+  // 发版门禁交给 CI（干净机器无物可毁）；确要在本机跑必须显式 --force-installer。
+  const localInstallKeys = findVisibleUninstallKeys();
+  const localInstallCount = localInstallKeys === null ? null : localInstallKeys.length;
+
+  if (!forceInstaller && localInstallCount === null) {
+    skipStep(
+      '安装器端到端',
+      '无法确认本机是否已有该应用的真实安装（注册表扫描失败）——默认不跑破坏性步骤；确认环境干净后加 --force-installer',
+    );
+  } else if (!forceInstaller && localInstallCount > 0) {
+    skipStep(
+      '安装器端到端',
+      `本机存在真实安装（${localInstallCount} 个已登记卸载键，如 ${localInstallKeys[0]}）——` +
+        'NSIS 快捷方式/注册表命名空间由产品名/GUID 派生、与安装目录无关，"装到临时目录"隔离不了它；' +
+        '发版门禁由 CI（干净机器）承担；确要在本机跑请加 --force-installer（暂存/复查/快照还原护栏会启用）',
+    );
+  } else if (foreignCount > 0 && !forceInstaller) {
     skipStep(
       '安装器端到端',
       `检测到 ${foreignCount} 个正在运行的 DS Harness Desktop 实例——NSIS 安装/卸载会按进程名杀掉所有同名进程（会误杀你正在用的窗口），已跳过；退出正式实例后重跑，或加 --force-installer 强行`,
@@ -812,6 +837,12 @@ async function main() {
   } else if (fs.existsSync(packedExePath) && fs.statSync(installer).mtimeMs < fs.statSync(packedExePath).mtimeMs) {
     skipStep('安装器端到端', `安装包比当前 win-unpacked 旧（${path.basename(installer)}），先 npm run build 再验证`);
   } else {
+    if (forceInstaller && localInstallCount > 0) {
+      console.warn(
+        `       ! --force-installer 已生效：本机存在真实安装（${localInstallCount} 个卸载键），` +
+          '请确认你用的是管理员 PowerShell——暂存/复查/还原护栏生效，跑完核对收尾复查行',
+      );
+    }
     await step('静默安装到临时目录 → 启动 → 端口监听 → 卸载并还原快捷方式', async () => {
       const tempBase = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-verify-inst-'));
       const installDir = path.join(tempBase, 'installed-app');
@@ -845,9 +876,10 @@ async function main() {
         // 硬闸（fail-closed）：以独立实现复查，只要还能读到本机卸载键就绝不启动安装器
         assertNoVisibleUninstallKeys('安装前');
 
-        // /S 静默安装；/D= 必须是最后一个参数且不带引号（NSIS 约定）
+        // /S 静默安装；/currentuser 强制每用户命名空间（不碰公共桌面/HKLM，隔离真实安装）；
+        // /D= 必须是最后一个参数且不带引号（NSIS 约定）
         const t0 = Date.now();
-        const ins = spawnSync(installer, ['/S', `/D=${installDir}`], {
+        const ins = spawnSync(installer, ['/S', '/currentuser', `/D=${installDir}`], {
           encoding: 'utf8',
           windowsHide: true,
           timeout: 300_000,
@@ -862,6 +894,20 @@ async function main() {
         const installedExe = path.join(installDir, APP_EXE_NAME);
         assert.ok(fs.existsSync(installedExe), `安装完成但缺少 ${installedExe}`);
         console.log(`       | 安装完成（${installSecs}s）→ ${installDir}`);
+
+        // 观测 temp 实例把自己登记到哪个命名空间——/currentuser 的隔离要"看得见"才算数
+        const tempRegistrations = findVisibleUninstallKeys();
+        if (tempRegistrations === null) {
+          console.warn('       ! temp 实例注册位置未知（扫描失败）——请人工确认它没写 HKLM');
+        } else if (tempRegistrations.length === 0) {
+          console.warn('       ! temp 实例未登记卸载键（静默安装可能未注册；继续，但请留意）');
+        } else {
+          const inMachine = tempRegistrations.filter((k) => k.startsWith('HKLM'));
+          console.log(
+            `       | temp 实例注册于 ${tempRegistrations.join('、')}` +
+              (inMachine.length > 0 ? '  ⚠ 含 HKLM（每用户隔离未生效！）' : '  ✓ 仅 HKCU（每用户命名空间）'),
+          );
+        }
 
         const port = await findFreePort(3590);
         const { dirs, env } = isolationEnv(tempBase, port);
