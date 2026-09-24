@@ -8,6 +8,7 @@
  * 用法：
  *   npm run verify:smoke               # 完整冒烟；见下方各步的 SKIP 规则
  *   npm run verify:smoke -- --packaged # 强制要求 win-unpacked 存在，缺失即失败
+ *   npm run verify:smoke -- --audit-stash # 只演练「暂存/还原本机卸载键」，不跑安装器
  *   npm run build / build:dir          # 打包脚本已挂本体检（打包成功即自动执行）
  *
  * 步骤：
@@ -28,6 +29,9 @@
  * 硬约束：
  *   - 全程 DSH_HOME / userData / cwd 指向临时目录，不触碰真实 ~/.dsh 与真实安装状态
  *   - [5] 对本机既有安装的桌面/开始菜单快捷方式先快照后还原，不留痕迹
+ *   - [5] 动安装器前有两道 fail-closed 防线：三 hive 暂存本机卸载键与安装记忆键 +
+ *     独立实现复查，复查不干净或扫描失败一律中止（2026-09-24 事故：只暂存 HKCU，
+ *     全机安装被 NSIS 当旧版静默卸载；复盘见大脑 JOURNAL/2026-09-24，--audit-stash 零风险演练）
  *   - 只杀自己拉起的进程树；不联网安装任何东西（更新链路端到端另有 npm run test:e2e）
  */
 
@@ -465,12 +469,31 @@ function stashUninstallKeys(backupDir, entries) {
       const del = spawnSync('reg', ['delete', key, '/f'], { encoding: 'utf8', windowsHide: true });
       if (del.status !== 0) {
         throw new Error(
-          `无法删除卸载键 ${key}（大概率未提权）：${String(del.stderr || del.stdout || '').trim()}` +
-            '——继续运行会让安装器把真实安装当旧版卸掉，中止',
+          `无法删除卸载键 ${key}——最常见原因是未提权（请用「以管理员身份运行」的 PowerShell 重跑）；` +
+            '继续运行会让安装器把真实安装当旧版卸掉，已中止',
         );
       }
       entries.push({ key, file });
       console.log(`       | 暂存卸载键 ${key}${dir ? `（真实安装 ${dir}）` : ''}`);
+
+      // 同一个 GUID 也是"安装记忆键"（electron-builder 的 INSTALL_REGISTRY_KEY = Software\<GUID>）：
+      // temp 安装会覆盖它、temp 卸载器会把它删掉。不一起暂存，[5] 跑完本机就丢了安装记忆，
+      // 下次更新向导失去"原地回填"依据 → 漂移/双安装风险（见大脑已知坑「更新向导模式页陷阱」）。
+      const memoryKey = `${root.replace(/\\Microsoft\\Windows\\CurrentVersion\\Uninstall$/, '')}\\${name}`;
+      const memQuery = spawnSync('reg', ['query', memoryKey], { encoding: 'utf8', windowsHide: true });
+      if (memQuery.status === 0) {
+        const memFile = path.join(backupDir, `regkey-memory-${entries.length}.reg`);
+        const memExport = spawnSync('reg', ['export', memoryKey, memFile, '/y'], { encoding: 'utf8', windowsHide: true });
+        if (memExport.status !== 0 || !fs.existsSync(memFile)) {
+          throw new Error(`安装记忆键 ${memoryKey} 导出失败——无法安全暂存，中止`);
+        }
+        const memDelete = spawnSync('reg', ['delete', memoryKey, '/f'], { encoding: 'utf8', windowsHide: true });
+        if (memDelete.status !== 0) {
+          throw new Error(`无法删除安装记忆键 ${memoryKey}（大概率未提权）——已中止`);
+        }
+        entries.push({ key: memoryKey, file: memFile });
+        console.log(`       | 暂存安装记忆键 ${memoryKey}`);
+      }
     }
   }
   return realDirs;
@@ -487,7 +510,153 @@ function restoreUninstallKeys(entries) {
 }
 
 // ---------------------------------------------------------------------------
+// 失控前防线：独立实现的只读复查 + 零风险自检模式（都不启动安装器）
+// ---------------------------------------------------------------------------
+
+/**
+ * 独立实现（PowerShell 注册表提供程序，与暂存用的 reg.exe 解析互为对照）只读扫描：
+ * 本机还有没有能让 NSIS uninstallOldVersion 找到"旧版"的卸载键。
+ * 返回键路径数组；返回 null 表示扫描失败——调用方必须按 fail-closed 处理。
+ */
+const UNINSTALL_SCAN_PS = [
+  '$roots = @(',
+  "  'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall',",
+  "  'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall',",
+  "  'HKLM:\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall')",
+  '$hits = @()',
+  'foreach ($r in $roots) {',
+  '  if (-not (Test-Path $r)) { continue }',
+  '  Get-ChildItem $r -ErrorAction SilentlyContinue | ForEach-Object {',
+  '    $p = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue',
+  '    $d = [string]$p.DisplayName',
+  '    $u = [string]$p.UninstallString',
+  "    if ($d -match 'DS Harness Desktop' -or $u -match 'DS Harness Desktop') {",
+  "      $hits += ($_.Name -replace '^HKEY_CURRENT_USER', 'HKCU' -replace '^HKEY_LOCAL_MACHINE', 'HKLM')",
+  '    }',
+  '  }',
+  '}',
+  '$hits | ForEach-Object { Write-Output ("KEY=" + $_) }',
+  'Write-Output ("SCAN-DONE " + $hits.Count)',
+].join('\n');
+
+function findVisibleUninstallKeys() {
+  const script = path.join(os.tmpdir(), `dsh-uninst-scan-${process.pid}.ps1`);
+  try {
+    fs.writeFileSync(script, UNINSTALL_SCAN_PS, 'utf8');
+    const r = spawnSync(
+      'powershell',
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script],
+      { encoding: 'utf8', windowsHide: true, timeout: 60_000 },
+    );
+    if (r.error) return null;
+    const lines = String(r.stdout || '')
+      .split(/\r?\n/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    // 哨兵行是"脚本真的跑完了"的唯一凭据（不能拿 JSON 形态判断：PS 5.1 对单元素数组
+    // 会退化成裸字符串）——没有哨兵或计数对不上一律按扫描失败处理（fail-closed）。
+    const doneLine = [...lines].reverse().find((l) => /^SCAN-DONE \d+$/.test(l));
+    if (!doneLine) return null;
+    const expected = Number(doneLine.split(' ')[1]);
+    const keys = lines.filter((l) => l.startsWith('KEY=')).map((l) => l.slice(4));
+    if (keys.length !== expected) return null;
+    return keys;
+  } catch {
+    return null;
+  } finally {
+    try {
+      fs.rmSync(script, { force: true });
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+/** 只有复查判定为"干净"才放行安装器；扫描失败（null）或仍有键一律中止。 */
+function assertNoVisibleUninstallKeys(stage) {
+  const visible = findVisibleUninstallKeys();
+  if (visible === null) {
+    throw new Error(`${stage}复查失败（PowerShell 扫描无结果）——拒绝继续，fail-closed`);
+  }
+  if (visible.length > 0) {
+    throw new Error(
+      `${stage}复查仍发现 ${visible.length} 个未暂存的卸载键，拒绝继续（否则安装器会执行真卸载器）：\n  ` +
+        visible.join('\n  '),
+    );
+  }
+  console.log(`       | ${stage}复查通过：HKCU/HKLM/HKLM-WOW6432Node 均无未暂存的卸载键`);
+}
+
+/**
+ * 零风险自检：不跑安装器，只演练「扫描 → 暂存 → 复查 → 还原 → 再复查」，
+ * 回答"防护网真的能挡住误删吗"。用法：npm run verify:smoke -- --audit-stash
+ * 会临时删除本机卸载键并随即导回；若中途被打断，用 产出\reg-backup-*\*.reg 手工导回。
+ */
+async function auditStashSafety() {
+  console.log('\n[自检] 暂存/还原演练（不启动任何安装器、不碰应用文件）');
+  const tempBase = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-audit-stash-'));
+  const backupDir = path.join(tempBase, 'reg-backup');
+  const entries = [];
+  let ok = false;
+  try {
+    const before = findVisibleUninstallKeys();
+    if (before === null) throw new Error('扫描失败（PowerShell 无输出）');
+    console.log(`  1) 扫描本机卸载键：命中 ${before.length} 个`);
+    for (const k of before) console.log(`       ${k}`);
+
+    const realDirs = stashUninstallKeys(backupDir, entries);
+    console.log(
+      `  2) 真实暂存：导出并删除 ${entries.length} 个键（卸载键 + 安装记忆键）；推断真实安装目录 ${realDirs.length} 个`,
+    );
+    for (const e of entries) console.log(`       ${e.key}`);
+    for (const d of realDirs) console.log(`       真实安装：${d}`);
+
+    const after = findVisibleUninstallKeys();
+    if (after === null) throw new Error('暂存后复查扫描失败');
+    console.log(`  3) 暂存后复查：命中 ${after.length} 个（期望 0）`);
+    for (const k of after) console.log(`       ! 泄漏 ${k}`);
+
+    restoreUninstallKeys(entries);
+    const restored = findVisibleUninstallKeys();
+    if (restored === null) throw new Error('还原后扫描失败');
+    console.log(`  4) 还原后复查：命中 ${restored.length} 个（期望 ${before.length}）`);
+
+    if (before.length === 0) {
+      console.log('  结论：本机没有已登记的安装键（全新环境），防护网无事可做 → 视为通过 ✓');
+      ok = true;
+    } else {
+      // entries 含卸载键 + 安装记忆键，故用 >=；复查/还原一律以"卸载键可见数"为准
+      ok = entries.length >= before.length && after.length === 0 && restored.length === before.length;
+      console.log(
+        ok
+          ? '  结论：防护网有效——暂存藏住了本机键、独立复查确认干净、还原完整 ✓'
+          : '  结论：未达预期 ✗（对照上面各步数字，先别跑完整 [5]）',
+      );
+    }
+  } catch (error) {
+    console.log(`  ! 自检中止：${error.message}`);
+    console.log('    fail-closed：没有删除任何应用文件；已暂存的键会在收尾时导回');
+  } finally {
+    try {
+      restoreUninstallKeys(entries);
+    } catch (error) {
+      console.warn(`       ! 还原异常：${error.message}`);
+    }
+    try {
+      fs.rmSync(tempBase, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  }
+  process.exit(ok ? 0 : 1);
+}
+
+// ---------------------------------------------------------------------------
 async function main() {
+  if (process.argv.includes('--audit-stash')) {
+    await auditStashSafety();
+    return;
+  }
   // -------------------------------------------------------------------------
   console.log('\n[1] 离线单测（test/updater.test.js）');
   // -------------------------------------------------------------------------
@@ -649,6 +818,9 @@ async function main() {
         } else {
           console.log('       | 未发现本机已登记的卸载键（全新环境）');
         }
+
+        // 硬闸（fail-closed）：以独立实现复查，只要还能读到本机卸载键就绝不启动安装器
+        assertNoVisibleUninstallKeys('安装前');
 
         // /S 静默安装；/D= 必须是最后一个参数且不带引号（NSIS 约定）
         const t0 = Date.now();
