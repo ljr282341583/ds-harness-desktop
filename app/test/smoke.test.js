@@ -32,6 +32,8 @@
  *   - [5] 动安装器前有两道 fail-closed 防线：三 hive 暂存本机卸载键与安装记忆键 +
  *     独立实现复查，复查不干净或扫描失败一律中止（2026-09-24 事故：只暂存 HKCU，
  *     全机安装被 NSIS 当旧版静默卸载；复盘见大脑 JOURNAL/2026-09-24，--audit-stash 零风险演练）
+ *   - [5] 跑完必须"痕迹全无"：快捷方式（含公共桌面/所有用户开始菜单）逐项复查在位、
+ *     本机卸载键数回到基线，任一不满足即判红——不再有静默的"已还原为安装前状态"
  *   - 只杀自己拉起的进程树；不联网安装任何东西（更新链路端到端另有 npm run test:e2e）
  */
 
@@ -316,15 +318,20 @@ function snapshotShortcuts(backupDir) {
   return snap;
 }
 
-/** 还原备份的快捷方式；没备份过但残留下来的（本次测试创建的）则删除。 */
+/**
+ * 还原备份的快捷方式；没备份过但残留下来的（本次测试创建的）则删除。
+ * 返回"未能原样还原"的原路径列表——调用方必须据此硬断言（2026-09-24 教训：
+ * 还原失败若只 warn，用户就会在绿色输出里丢掉自己的快捷方式）。
+ */
 function restoreShortcuts(snap, backupDir) {
+  const failures = [];
   const restored = new Set(snap.map((s) => s.original));
   for (const s of snap) {
     try {
       fs.rmSync(s.original, { recursive: true, force: true });
       fs.cpSync(s.backup, s.original, { recursive: true });
-    } catch {
-      /* best effort */
+    } catch (error) {
+      failures.push(`${s.original}（复制失败：${error.message}）`);
     }
   }
   for (const t of shortcutTargets()) {
@@ -338,7 +345,12 @@ function restoreShortcuts(snap, backupDir) {
       }
     }
   }
+  // 逐个复查：快照里有的原路径，还原后必须真的都在
+  for (const s of snap) {
+    if (!fs.existsSync(s.original)) failures.push(`${s.original}（还原后不存在）`);
+  }
   fs.rmSync(backupDir, { recursive: true, force: true });
+  return failures;
 }
 
 /** 产出\ 下最新的 NSIS 安装包（*Setup*.exe）。 */
@@ -807,9 +819,17 @@ async function main() {
       let snap = null;
       let keyStash = [];
       const realDirs = [];
+      let baselineKeys = null;
+      let bodyError = null;
+      const shortcutFailures = [];
       try {
         console.log(`       | 安装包 ${path.basename(installer)}`);
         snap = snapshotShortcuts(backupDir);
+        // 基线：跑之前本机可见的卸载键数量（跑完必须回到这个数）
+        baselineKeys = findVisibleUninstallKeys();
+        if (baselineKeys === null) {
+          throw new Error('安装前基线扫描失败（PowerShell 无输出）——fail-closed 中止');
+        }
         // entries 用调用方数组逐步写入：中途抛错时 finally 仍能把已藏的键导回
         const stashedRealDirs = stashUninstallKeys(backupDir, keyStash);
         realDirs.push(...stashedRealDirs);
@@ -878,24 +898,59 @@ async function main() {
           );
         }
         if (realDirs.length > 0) console.log(`       真实安装体完好（${realDirs.join('; ')}）`);
+      } catch (error) {
+        bodyError = error;
+        throw error;
       } finally {
-        // 收尾异常绝不能顶掉主流程的真实报错，也不能把已完成的判定打红
+        // 收尾异常绝不能顶掉主流程的真实报错；但"清理没做干净"必须在主流程成功时判红
         try {
           restoreUninstallKeys(keyStash);
         } catch (error) {
-          console.warn(`       ! 卸载键恢复异常（不影响判定）：${error.message}`);
+          console.warn(`       ! 卸载键恢复异常：${error.message}`);
         }
         try {
-          if (snap) restoreShortcuts(snap, backupDir);
-          console.log('       快捷方式已还原为安装前状态');
+          if (snap) {
+            const failures = restoreShortcuts(snap, backupDir);
+            shortcutFailures.push(...failures);
+            if (failures.length === 0) {
+              console.log(`       快捷方式已还原为安装前状态（${snap.length} 项快照逐项复查在位）`);
+            } else {
+              console.warn(`       ! 快捷方式未能原样还原：${failures.join('；')}`);
+            }
+          }
         } catch (error) {
-          console.warn(`       ! 快捷方式还原失败（不影响判定）：${error.message}`);
+          shortcutFailures.push(`快捷方式还原异常：${error.message}`);
+        }
+        // 收尾复查：本机卸载键必须回到基线（用独立实现扫描，避免"自己说自己好了"）
+        let afterKeys = null;
+        try {
+          afterKeys = findVisibleUninstallKeys();
+        } catch {
+          afterKeys = null;
+        }
+        if (afterKeys === null) {
+          shortcutFailures.push('收尾复查扫描失败（无法确认本机卸载键已还原）');
+        } else if (baselineKeys === null) {
+          console.log(`       收尾复查：本机卸载键可见 ${afterKeys.length} 个（基线缺失，未作比较）`);
+        } else if (afterKeys.length !== baselineKeys.length) {
+          shortcutFailures.push(
+            `本机卸载键未回到基线（跑前 ${baselineKeys.length} 个，跑后 ${afterKeys.length} 个）`,
+          );
+        } else {
+          console.log(`       收尾复查通过：本机卸载键回到基线 ${afterKeys.length} 个`);
         }
         try {
           killProcessesUnder(tempBase);
           removeTreeSafe(tempBase);
         } catch (error) {
-          console.warn(`       ! 临时目录清理失败（不影响判定）：${error.message}`);
+          console.warn(`       ! 临时目录清理失败：${error.message}`);
+        }
+        // 主流程成功时，"痕迹未清干净"必须判红（宁可报红，也不留静默损失）
+        if (!bodyError && shortcutFailures.length > 0) {
+          throw new Error(
+            `跑完未能做到痕迹全无（快捷方式/注册表）：\n  ${shortcutFailures.join('\n  ')}\n` +
+              '  恢复：产出\\reg-backup-*\\*.reg 手工 reg import；快捷方式重新安装即为原样',
+          );
         }
       }
     });
