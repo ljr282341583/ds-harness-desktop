@@ -835,6 +835,9 @@ async function main() {
         realDirs.push(...stashedRealDirs);
         if (keyStash.length > 0) {
           console.log(`       | 已暂存 ${keyStash.length} 个卸载注册表键（防 temp 安装把真安装当旧版卸载）`);
+          console.log(
+            `       | 中断恢复：若本次运行被强制中断，对 ${backupDir} 下每个 .reg 执行 reg import 即可复原`,
+          );
         } else {
           console.log('       | 未发现本机已登记的卸载键（全新环境）');
         }
