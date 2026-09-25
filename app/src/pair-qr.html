@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'" />
+  <title>手机访问 · 配对二维码</title>
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 18px 18px 20px;
+      font: 13px/1.6 system-ui, "Microsoft YaHei", sans-serif;
+      background: #fff;
+      color: #1a1a1a;
+    }
+    h1 { margin: 0 0 4px; font-size: 15px; }
+    .sub { margin: 0 0 14px; color: #666; font-size: 12px; }
+    #qrwrap {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 12px;
+      border: 1px solid #e3e3e3;
+      border-radius: 12px;
+      background: #fff;
+      min-height: 260px;
+    }
+    #qr { width: 300px; height: 300px; image-rendering: pixelated; display: none; }
+    #status { color: #666; }
+    .addr {
+      margin-top: 12px;
+      padding: 8px 10px;
+      border: 1px solid #e3e3e3;
+      border-radius: 8px;
+      font: 12px/1.5 ui-monospace, Consolas, monospace;
+      word-break: break-all;
+      user-select: text;
+      background: #fafafa;
+      max-height: 72px;
+      overflow: auto;
+    }
+    .row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+    button {
+      min-height: 34px;
+      padding: 0 14px;
+      border: 1px solid #d0d0d0;
+      border-radius: 8px;
+      background: #f6f6f6;
+      color: inherit;
+      font: inherit;
+      cursor: pointer;
+    }
+    button:hover { background: #eee; }
+    button.primary { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+    button.primary:hover { background: #1a60cf; }
+    .hint { margin-top: 12px; color: #777; font-size: 12px; }
+    .hint b { color: #1a1a1a; }
+    label.toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>手机访问 · 配对二维码</h1>
+  <p class="sub">用手机上的 DS Harness → 右上角菜单 ⋮ →「扫码配对」扫下面这张。</p>
+
+  <div id="qrwrap">
+    <span id="status">正在生成…</span>
+    <img id="qr" alt="配对二维码" />
+  </div>
+
+  <div class="addr" id="addr">—</div>
+
+  <div class="row">
+    <button class="primary" id="copy">复制地址</button>
+    <button id="retry">重新生成</button>
+    <label class="toggle"><input type="checkbox" id="useip" /> 用 IP 画码（MagicDNS 连不上时）</label>
+  </div>
+
+  <p class="hint">
+    手机与电脑都要装 <b>Tailscale</b> 并登录同一账号；中继只绑尾网地址，局域网里其它设备摸不到。<br />
+    配对一次可用 <b>30 天</b>；中继关掉手机就连不上，但配对不会失效，重开即可。
+  </p>
+
+  <script>
+    const qrEl = document.getElementById('qr');
+    const statusEl = document.getElementById('status');
+    const addrEl = document.getElementById('addr');
+    const useIpEl = document.getElementById('useip');
+    const api = window.dshDesktop || {};
+
+    function render(payload) {
+      if (!payload || payload.error) {
+        statusEl.style.display = 'inline';
+        statusEl.textContent = (payload && payload.error) || '拿不到手机访问地址（见桌面端日志）';
+        qrEl.style.display = 'none';
+        addrEl.textContent = '—';
+        return;
+      }
+      addrEl.textContent = payload.url;
+      qrEl.src = payload.dataUrl;
+      // 必须显式给 block：CSS 里 #qr 是 display:none，写成 style.display = '' 会退回那条规则、图就看不见
+      qrEl.style.display = 'block';
+      statusEl.style.display = 'none';
+      useIpEl.checked = Boolean(payload.preferIp);
+    }
+
+    async function load() {
+      statusEl.style.display = 'inline';
+      statusEl.textContent = '正在生成…';
+      try {
+        render(await api.mobileQr());
+      } catch (error) {
+        render({ error: '生成失败：' + error.message });
+      }
+    }
+
+    document.getElementById('retry').addEventListener('click', load);
+    useIpEl.addEventListener('change', async () => {
+      try {
+        render(await api.mobileSetPreferIp(useIpEl.checked));
+      } catch (error) {
+        render({ error: '切换失败：' + error.message });
+      }
+    });
+    document.getElementById('copy').addEventListener('click', async () => {
+      const ok = await api.mobileCopyAddress();
+      const btn = document.getElementById('copy');
+      btn.textContent = ok ? '已复制 ✓' : '复制失败';
+      setTimeout(() => { btn.textContent = '复制地址'; }, 1200);
+    });
+
+    load();
+  </script>
+</body>
+</html>

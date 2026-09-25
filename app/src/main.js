@@ -15,6 +15,9 @@ const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
 const updater = require('./updater.js');
+const { startMobileRelay } = require('./relay.js');
+const { resolveTailnetAddress, pickHost } = require('./tailnet.js');
+const { qrToPng } = require('./qr-png.js');
 const { autoUpdater } = require('electron-updater');
 
 // 起始端口可用 DSH_DESKTOP_PORT 覆盖：冒烟/验证时本机往往已有 dsh web 占着 3080，
@@ -57,6 +60,21 @@ let shellUpdateInProgress = false;
 let shellUpdateReady = null;
 // 记录当前 dsh 子进程的退出，供"干净停机"等待使用
 let dshExitPromise = null;
+
+// ---------------------------------------------------------------------------
+// 手机访问（中继跑在主进程内 → 天然随桌面端生死，不留孤儿进程）
+// ---------------------------------------------------------------------------
+// 它只把"手机够得着的尾网地址"接到 127.0.0.1:<dshPort>，**不持有任何凭据**：
+// 认证仍由官方启动令牌 + 30 天 cookie 负责。因此：
+//   · 起中继不需要令牌（dsh 重启换令牌也不影响已配对的手机）；
+//   · 只有"扫码配对"那一下需要带令牌的地址，按需从 webLaunchUrl 现算。
+const MOBILE_PORT_START = 8787;
+const MOBILE_PORT_TRIES = 8;
+let mobileRelay = null;        // { port, host, close() }
+let mobileAddress = null;      // { ip, dns, source }
+let mobileError = '';          // 人话原因：拿不到尾网地址 / 端口起不来
+let mobilePrefs = { enabled: true, preferIp: false };
+let pairWindow = null;         // 「配对二维码」小窗
 
 // 简单文件日志（GUI 应用无控制台，重定向又不可靠，写文件最稳）
 // 日志只增不减会越积越大（dsh 出错时会打印几十 KB 的堆栈），因此做单份轮转：
@@ -137,6 +155,7 @@ app.on('before-quit', () => {
 
 app.on('will-quit', () => {
   stopHarness();
+  void stopMobileAccess();
 });
 
 // ---------------------------------------------------------------------------
@@ -174,10 +193,23 @@ async function bootstrap() {
   ipcMain.handle('dsh:shell-update-check', async () => checkShellUpdate({ silent: true }));
   ipcMain.handle('dsh:shell-update-install', async () => installShellUpdate());
 
+  // 手机访问：状态 / 开关 / 二维码 / 复制地址
+  mobilePrefs = loadMobilePrefs();
+  ipcMain.handle('mobile:status', () => mobileStatus());
+  ipcMain.handle('mobile:set-enabled', (_event, enabled) => setMobileEnabled(Boolean(enabled)));
+  ipcMain.handle('mobile:set-prefer-ip', (_event, preferIp) => setMobilePreferIp(Boolean(preferIp)));
+  ipcMain.handle('mobile:qr', () => mobileQrPayload());
+  ipcMain.handle('mobile:copy-address', () => copyMobileAddress());
+  ipcMain.handle('mobile:show-qr', () => {
+    showPairWindow();
+    return true;
+  });
+
   initShellUpdater();
 
   createWindow();
   log('window created');
+  buildAppMenu();
   createTray();
   log('tray created');
   await startHarness();
@@ -455,6 +487,8 @@ async function startHarness() {
     child.once('error', () => resolve());
   });
   log('spawned dsh pid=', child.pid);
+  // 中继只依赖 dshPort（配对地址在需要时现算，令牌可能稍后才到）
+  void startMobileAccess();
 
   const teeToLog = (chunk) => {
     if (childLogFd == null) return;
@@ -522,6 +556,7 @@ async function startHarness() {
 }
 
 function stopHarness() {
+  void stopMobileAccess();   // 先收中继：dsh 没了它也转发不出去
   if (!dshChild) return;
   const pid = dshChild.pid;
   try {
@@ -623,6 +658,23 @@ function refreshTrayMenu() {
         },
       },
       { type: 'separator' },
+      { label: mobileMenuLabel(), click: () => showPairWindow() },
+      {
+        label: '手机访问',
+        type: 'checkbox',
+        checked: mobilePrefs.enabled,
+        click: (item) => {
+          void setMobileEnabled(item.checked);
+        },
+      },
+      {
+        label: '复制手机地址',
+        enabled: Boolean(currentMobileUrl()),
+        click: () => {
+          void copyMobileAddress();
+        },
+      },
+      { type: 'separator' },
       {
         label: `桌面端 v${info.shell} ｜ dsh v${info.dsh}（${sourceLabel}）`,
         enabled: false,
@@ -681,6 +733,285 @@ function refreshTrayMenu() {
           app.quit();
         },
       },
+    ]),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 手机访问（中继 + 配对二维码 + 状态/开关）
+// ---------------------------------------------------------------------------
+// 中继跑在主进程内 → 随 App 生死，不留孤儿进程。只绑尾网地址（不碰 0.0.0.0）。
+// 认证仍由官方令牌 + cookie 负责，这里不持有任何凭据。
+const MOBILE_PREFS_FILE = 'mobile-access.json';
+
+function mobilePrefsPath() {
+  return path.join(app.getPath('userData'), MOBILE_PREFS_FILE);
+}
+
+function loadMobilePrefs() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(mobilePrefsPath(), 'utf8'));
+    return { enabled: raw.enabled !== false, preferIp: raw.preferIp === true };
+  } catch {
+    return { enabled: true, preferIp: false };
+  }
+}
+
+function saveMobilePrefs() {
+  try {
+    fs.writeFileSync(mobilePrefsPath(), JSON.stringify(mobilePrefs, null, 2));
+  } catch {
+    /* 记不住偏好不影响功能 */
+  }
+}
+
+/** 手机该访问的地址：有令牌就带上（扫码配对要用），没有就给裸地址。 */
+function currentMobileUrl() {
+  if (!mobileRelay || !mobileAddress) return null;
+  const host = pickHost(mobileAddress, { preferIp: mobilePrefs.preferIp });
+  if (!host) return null;
+  const base = `http://${host}:${mobileRelay.port}`;
+  if (!webLaunchUrl) return `${base}/`;
+  return webLaunchUrl.replace(/^https?:\/\/127\.0\.0\.1:\d+/, base);
+}
+
+function mobileStatus() {
+  return {
+    enabled: mobilePrefs.enabled,
+    running: Boolean(mobileRelay),
+    url: currentMobileUrl(),
+    hasToken: Boolean(webLaunchUrl),
+    preferIp: mobilePrefs.preferIp,
+    host: mobileAddress ? pickHost(mobileAddress, { preferIp: mobilePrefs.preferIp }) : null,
+    dns: mobileAddress ? mobileAddress.dns : null,
+    ip: mobileAddress ? mobileAddress.ip : null,
+    port: mobileRelay ? mobileRelay.port : null,
+    source: mobileAddress ? mobileAddress.source : null,
+    error: mobileError,
+  };
+}
+
+function mobileMenuLabel() {
+  if (!mobilePrefs.enabled) return '手机访问：已关闭';
+  if (mobileRelay && mobileAddress) {
+    return `手机访问：已开启（${pickHost(mobileAddress, { preferIp: mobilePrefs.preferIp })}:${mobileRelay.port}）· 显示配对二维码`;
+  }
+  return mobileError ? `手机访问：不可用（${mobileError}）` : '手机访问：未就绪';
+}
+
+/** 起中继（幂等：先收旧的）。端口从 8787 起顺延，最多试 8 个。 */
+async function startMobileAccess() {
+  await stopMobileAccess();
+  mobileError = '';
+  if (!mobilePrefs.enabled) {
+    refreshTrayMenu();
+    return null;
+  }
+  const address = await resolveTailnetAddress();
+  if (!address || !address.ip) {
+    mobileAddress = null;
+    mobileError = '没找到 Tailscale 地址（需要装 Tailscale 并登录）';
+    log('[mobile] 未启动：', mobileError);
+    refreshTrayMenu();
+    return null;
+  }
+  mobileAddress = address;
+  for (let i = 0; i < MOBILE_PORT_TRIES; i += 1) {
+    const port = MOBILE_PORT_START + i;
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      mobileRelay = await startMobileRelay({
+        listenHost: address.ip,
+        listenPort: port,
+        target: `127.0.0.1:${dshPort}`,
+        log: (m) => log('[mobile]', m),
+        onRequest: (info) => {
+          if (info.status >= 400) log('[mobile] 请求', JSON.stringify(info));
+        },
+      });
+      log('[mobile] 中继就绪', `${address.ip}:${mobileRelay.port}`, `-> 127.0.0.1:${dshPort}`);
+      refreshTrayMenu();
+      return mobileRelay;
+    } catch (error) {
+      if (error && error.code !== 'EADDRINUSE') {
+        mobileRelay = null;
+        mobileError = `中继起不来：${error.message}`;
+        log('[mobile]', mobileError);
+        refreshTrayMenu();
+        return null;
+      }
+    }
+  }
+  mobileRelay = null;
+  mobileError = `端口 ${MOBILE_PORT_START}~${MOBILE_PORT_START + MOBILE_PORT_TRIES - 1} 都被占用了`;
+  log('[mobile]', mobileError);
+  refreshTrayMenu();
+  return null;
+}
+
+async function stopMobileAccess() {
+  if (!mobileRelay) return;
+  const relay = mobileRelay;
+  mobileRelay = null;
+  try {
+    await relay.close();
+  } catch {
+    /* ignore */
+  }
+  log('[mobile] 中继已停止');
+  refreshTrayMenu();
+}
+
+async function setMobileEnabled(enabled) {
+  mobilePrefs.enabled = enabled;
+  saveMobilePrefs();
+  if (enabled) await startMobileAccess();
+  else await stopMobileAccess();
+  refreshTrayMenu();
+  return mobileStatus();
+}
+
+async function setMobilePreferIp(preferIp) {
+  mobilePrefs.preferIp = preferIp;
+  saveMobilePrefs();
+  refreshTrayMenu();
+  return mobileQrPayload();
+}
+
+/** 给二维码小窗的数据：地址 + PNG data URL（自己编码，不引第三方）。 */
+async function mobileQrPayload() {
+  const url = currentMobileUrl();
+  if (!url) {
+    return { error: mobilePrefs.enabled ? (mobileError || '手机访问未就绪') : '手机访问已关闭（托盘菜单里可打开）' };
+  }
+  try {
+    return { url, dataUrl: await makeQrDataUrl(url), preferIp: mobilePrefs.preferIp, hasToken: Boolean(webLaunchUrl) };
+  } catch (error) {
+    return { error: `生成二维码失败：${error.message}` };
+  }
+}
+
+async function makeQrDataUrl(text) {
+  const mod = await import('./vendor/qrcode-generator/qrcode.mjs');
+  const qrcode = mod.default || mod;
+  let qr = null;
+  for (let v = 0; v <= 40 && qr === null; v += 1) {
+    try {
+      const candidate = qrcode(v, 'M');
+      candidate.addData(text, 'Byte');
+      candidate.make();
+      qr = candidate;
+    } catch {
+      /* 这个版本装不下就试下一个（v=0 表示自动选版本） */
+    }
+  }
+  if (qr === null) throw new Error('内容太长，二维码装不下');
+  const { buffer } = qrToPng(qr, { scale: 10, margin: 4 });
+  return `data:image/png;base64,${buffer.toString('base64')}`;
+}
+
+function showPairWindow() {
+  if (pairWindow && !pairWindow.isDestroyed()) {
+    pairWindow.show();
+    pairWindow.focus();
+    return pairWindow;
+  }
+  pairWindow = new BrowserWindow({
+    width: 420,
+    height: 660,
+    minimizable: false,
+    maximizable: false,
+    title: '手机访问 · 配对二维码',
+    autoHideMenuBar: true,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      preload: path.join(__dirname, 'preload.js'),
+    },
+  });
+  pairWindow.setMenuBarVisibility(false);
+  pairWindow.loadFile(path.join(__dirname, 'pair-qr.html'));
+  pairWindow.on('closed', () => {
+    pairWindow = null;
+  });
+  return pairWindow;
+}
+
+async function copyMobileAddress() {
+  const url = currentMobileUrl();
+  if (!url) return false;
+  const { clipboard } = require('electron');
+  clipboard.writeText(url);
+  return true;
+}
+
+/** 应用菜单（窗口菜单栏；autoHideMenuBar 下用 Alt 唤出）。 */
+function buildAppMenu() {
+  const mobile = {
+    label: '手机访问',
+    submenu: [
+      { label: '显示配对二维码', click: () => showPairWindow() },
+      {
+        label: '复制手机地址',
+        enabled: Boolean(currentMobileUrl()),
+        click: () => {
+          void copyMobileAddress();
+        },
+      },
+      { type: 'separator' },
+      {
+        label: '启用手机访问（中继）',
+        type: 'checkbox',
+        checked: mobilePrefs.enabled,
+        click: (item) => {
+          void setMobileEnabled(item.checked);
+        },
+      },
+      {
+        label: '用 IP 画码（MagicDNS 连不上时）',
+        type: 'checkbox',
+        checked: mobilePrefs.preferIp,
+        click: (item) => {
+          void setMobilePreferIp(item.checked);
+        },
+      },
+    ],
+  };
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate([
+      {
+        label: '文件',
+        submenu: [
+          { label: '显示窗口', click: showWindow },
+          {
+            label: '重启服务',
+            click: async () => {
+              stopHarness();
+              await startHarness();
+            },
+          },
+          { type: 'separator' },
+          {
+            label: '退出',
+            click: () => {
+              quitting = true;
+              app.quit();
+            },
+          },
+        ],
+      },
+      {
+        label: '视图',
+        submenu: [
+          { role: 'reload' },
+          { role: 'toggleDevTools' },
+          { type: 'separator' },
+          { role: 'resetZoom' },
+          { role: 'zoomIn' },
+          { role: 'zoomOut' },
+        ],
+      },
+      mobile,
     ]),
   );
 }
