@@ -242,9 +242,119 @@ console.log('\n[3] checkForUpdate 判定');
   });
 
   // -------------------------------------------------------------------------
+  console.log('\n[7] profile bundle 预检（回退到内置版本前，先问「回退真的有用吗」）');
+  // -------------------------------------------------------------------------
+
+  const profileRoot = tmpRoot('profile');
+
+  /** 造一个「已安装的包」目录（上游判据要求存在 package.json，目录空壳不算）。 */
+  function makePackage(nodeModulesDir, name) {
+    const target = path.join(nodeModulesDir, ...name.split('/'));
+    fs.mkdirSync(target, { recursive: true });
+    fs.writeFileSync(path.join(target, 'package.json'), JSON.stringify({ name }), 'utf8');
+    return target;
+  }
+
+  /** 造一个 profile 目录：package.json 的 dsh.profile.bundles + 可选的本地 node_modules。 */
+  function fakeProfile(label, bundles, options = {}) {
+    const dir = path.join(profileRoot, label);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'package.json'),
+      JSON.stringify({ name: `dsh-profile-${label}`, private: true, dsh: { profile: { bundles } } }),
+      'utf8',
+    );
+    for (const name of options.inProfile || []) makePackage(path.join(dir, 'node_modules'), name);
+    return dir;
+  }
+
+  // 假的「内置安装」：只有 0.1.5 时代就有的包，没有任何 experimental 包
+  const builtinRoot = tmpRoot('builtin');
+  makePackage(path.join(builtinRoot, 'node_modules'), '@deepseek-ai/dsh');
+  for (const name of ['dsh-object-hasown-polyfill', '@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']) {
+    makePackage(path.join(builtinRoot, 'node_modules'), name);
+  }
+
+  test('全部能解析 → ok 且 checked', () => {
+    const dir = fakeProfile('all-ok', ['dsh-object-hasown-polyfill', '@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']);
+    const r = updater.checkProfileBundles({ installRoot: builtinRoot, profileDir: dir });
+    assert.equal(r.checked, true);
+    assert.equal(r.ok, true);
+    assert.deepEqual(r.missing, []);
+  });
+
+  test('内置版本缺实验包 → not ok，并列出缺哪些（2026-09-30 的那两个）', () => {
+    const dir = fakeProfile('missing', [
+      '@deepseek-ai/dsh-base',
+      '@deepseek-ai/dsh-experimental-voice-input-bundle',
+      '@deepseek-ai/dsh-experimental-agent-team-profile',
+    ]);
+    const r = updater.checkProfileBundles({ installRoot: builtinRoot, profileDir: dir });
+    assert.equal(r.checked, true);
+    assert.equal(r.ok, false);
+    assert.deepEqual(r.missing, [
+      '@deepseek-ai/dsh-experimental-voice-input-bundle',
+      '@deepseek-ai/dsh-experimental-agent-team-profile',
+    ]);
+    assert.match(r.reason, /voice-input-bundle/);
+  });
+
+  test('profile 自己的 node_modules 里有 → 也算能解析（第二个锚点）', () => {
+    const dir = fakeProfile('own-modules', ['@scope/only-in-profile'], { inProfile: ['@scope/only-in-profile'] });
+    const r = updater.checkProfileBundles({ installRoot: builtinRoot, profileDir: dir });
+    assert.equal(r.ok, true);
+  });
+
+  test('父目录链命中（$DSH_HOME/profiles/node_modules）→ 可解析，与上游一致', () => {
+    // 本机实况：~/.dsh/profiles/node_modules 下是 junction，指向 npm 全局树
+    const base = path.join(profileRoot, 'chain', 'profiles');
+    const dir = path.join(base, 'web');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'package.json'),
+      JSON.stringify({ name: 'dsh-profile-web', dsh: { profile: { bundles: ['@scope/from-parent'] } } }),
+      'utf8',
+    );
+    makePackage(path.join(base, 'node_modules'), '@scope/from-parent');
+    const r = updater.checkProfileBundles({ installRoot: builtinRoot, profileDir: dir });
+    assert.equal(r.ok, true, `父目录链应命中，实际 missing=${r.missing.join(',')}`);
+  });
+
+  test('目录在但没有 package.json → 与上游一致判为不可解析', () => {
+    const dir = fakeProfile('bare-dir', ['@scope/bare']);
+    fs.mkdirSync(path.join(dir, 'node_modules', '@scope', 'bare'), { recursive: true });
+    const r = updater.checkProfileBundles({ installRoot: builtinRoot, profileDir: dir });
+    assert.equal(r.ok, false);
+    assert.deepEqual(r.missing, ['@scope/bare']);
+  });
+
+  test('读不到 profile 清单 → checked:false 且不阻断（保持原有回退行为）', () => {
+    const dir = path.join(profileRoot, 'no-manifest');
+    fs.mkdirSync(dir, { recursive: true });
+    const r = updater.checkProfileBundles({ installRoot: builtinRoot, profileDir: dir });
+    assert.equal(r.checked, false);
+    assert.equal(r.ok, true);
+  });
+
+  test('缺参数 → checked:false（不抛）', () => {
+    const r = updater.checkProfileBundles({});
+    assert.equal(r.checked, false);
+    assert.equal(r.ok, true);
+  });
+
+  test('bundles 缺失或非数组 → 视为通过', () => {
+    const empty = fakeProfile('empty', []);
+    const notArray = path.join(profileRoot, 'not-array');
+    fs.mkdirSync(notArray, { recursive: true });
+    fs.writeFileSync(path.join(notArray, 'package.json'), JSON.stringify({ dsh: { profile: { bundles: 'oops' } } }), 'utf8');
+    assert.equal(updater.checkProfileBundles({ installRoot: builtinRoot, profileDir: empty }).ok, true);
+    assert.equal(updater.checkProfileBundles({ installRoot: builtinRoot, profileDir: notArray }).ok, true);
+  });
+
+  // -------------------------------------------------------------------------
   const runE2E = process.argv.includes('--e2e');
   if (runE2E) {
-    console.log('\n[7] 端到端：真实下载安装 + 冒烟验证 + 激活 + 回滚');
+    console.log('\n[8] 端到端：真实下载安装 + 冒烟验证 + 激活 + 回滚');
     const e2eRoot = tmpRoot('e2e');
     const npmCli = process.env.DSH_TEST_NPM_CLI;
     // 允许注入侧车 node.exe，以验证"出厂配置"（捆绑 node + 捆绑 npm）真实可用
@@ -288,6 +398,8 @@ console.log('\n[3] checkForUpdate 判定');
 
   fs.rmSync(guardRoot, { recursive: true, force: true });
   fs.rmSync(stateRoot, { recursive: true, force: true });
+  fs.rmSync(profileRoot, { recursive: true, force: true });
+  fs.rmSync(builtinRoot, { recursive: true, force: true });
 
   console.log(`\n结果：通过 ${passed}，失败 ${failed}`);
   process.exit(failed === 0 ? 0 : 1);

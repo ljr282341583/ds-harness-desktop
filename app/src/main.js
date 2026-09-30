@@ -26,6 +26,15 @@ const DEFAULT_PORT = Number(process.env.DSH_DESKTOP_PORT) || 3080;
 const MAX_PORT_TRIES = 10;
 const READY_TIMEOUT_MS = 30_000;
 const READY_POLL_MS = 250;
+// 判定「启动失败」还是「运行中途崩溃」的时间窗：只有在这个窗口内退出、且**从未成功
+// 加载过 UI**，才算启动失败（才可能触发回退内置版本）。2026-09-30 事故就是旧判据把
+// 「跑了 4.6 小时后的静默崩溃」当成「覆盖版本启动失败」，当场永久降级。
+const STARTUP_GRACE_MS = 60_000;
+// 运行中途崩溃后的自动重启预算（滑动窗口内最多几次）；预算用尽只报错，不再改版本状态。
+const CRASH_RESTART_LIMIT = 3;
+const CRASH_RESTART_WINDOW_MS = 30 * 60_000;
+// 「健康长跑」门槛：跑够这么久再崩，视为独立事故，清空重启预算。
+const HEALTHY_UPTIME_MS = 10 * 60_000;
 // 等待 dsh 打印带 token 地址的上限。首次启动或刚换到新版本时，
 // dsh 需要初始化 profile（实测冷启动可达 60 秒以上），因此这里明显长于就绪探测超时。
 const TOKEN_WAIT_TIMEOUT_MS = 120_000;
@@ -53,6 +62,15 @@ function updateBaseDir() {
 let updateInProgress = false;
 // 覆盖版本启动失败时只自动回退一次，避免回退失败后无限重启
 let overrideFallbackDone = false;
+// 因自动回退而被停用的覆盖版本：内置版本同样起不来时，用它把 state.json 恢复回去。
+// 2026-09-30 事故只能靠手工改 state.json 才恢复；这里让壳自己完成这一步。
+let fallbackFromVersion = null;
+// 运行中途崩溃的自动重启时间戳（滑动窗口，见 CRASH_RESTART_LIMIT）
+let crashRestarts = [];
+// 串行化 harness 的「停/起」操作（2026-09-30 实锤：同一秒两次 restart 拉起两个子进程）
+let harnessQueue = Promise.resolve();
+// 本次启动在 dsh-child.log 里的起始字节偏移：错误页只展示本次输出（日志是追加+轮转的）
+let childLogStart = 0;
 
 // 外壳（桌面端自身）更新状态
 const SHELL_RELEASES_URL = 'https://github.com/ljr282341583/ds-harness-desktop/releases/latest';
@@ -168,8 +186,20 @@ async function bootstrap() {
   try {
     const overrideState = updater.readState(updateBaseDir());
     if (overrideState.activeVersion && !updater.resolveActiveRoot(updateBaseDir())) {
-      log('active override unusable, falling back to bundled:', overrideState.activeVersion);
-      updater.deactivate(updateBaseDir());
+      // 覆盖版本目录坏了。能不能降级到内置版本，取决于内置版本能不能满足当前 profile：
+      // 满足不了时降级 = 把用户永久锁死（2026-09-30 那次就是靠手工改 state.json 才恢复）。
+      // 这种情况宁可保留 state 不动：启动失败会走「报真实原因」那条路，用户修好或重装
+      // 覆盖版本即可恢复，而 state 一旦被清掉就再也回不去了。
+      const gaps = bundledProfileGaps();
+      if (gaps.checked && !gaps.ok) {
+        log(
+          '[updater] 覆盖版本目录不可用，但内置版本解析不了当前 profile，保留 state 不做降级：',
+          overrideState.activeVersion, '|', gaps.reason,
+        );
+      } else {
+        log('active override unusable, falling back to bundled:', overrideState.activeVersion);
+        updater.deactivate(updateBaseDir());
+      }
     }
   } catch (error) {
     log('override state check failed:', error.message);
@@ -179,8 +209,7 @@ async function bootstrap() {
   ipcMain.handle('dsh:get-error', () => lastError);
   ipcMain.handle('dsh:restart', async () => {
     log('restart requested');
-    stopHarness();
-    await startHarness();
+    await restartHarness();
     return dshPort;
   });
   ipcMain.handle('dsh:get-versions', () => describeVersions());
@@ -313,6 +342,38 @@ function bundledDshVersion() {
   }
 }
 
+/** 内置 dsh 安装根（打包态 resources/app、开发态 app/），即 `node_modules` 的父目录。 */
+function bundledInstallRoot() {
+  try {
+    // require.resolve 从本文件出发，命中的永远是壳自带的 dsh = 内置版本（不是覆盖版本）
+    return path.resolve(path.dirname(require.resolve('@deepseek-ai/dsh/package.json')), '..', '..', '..');
+  } catch {
+    return null;
+  }
+}
+
+/** 当前 dsh profile 目录（`dsh web` 的默认 profile 名是 web）。 */
+function profileDir() {
+  const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
+  return path.join(home, 'profiles', 'web');
+}
+
+/**
+ * 回退前的预检：内置版本能不能解析当前 profile 的 bundle 列表？
+ *
+ * `dsh-app-boot` 解析 bundle 只查两个锚点（该安装的 node_modules + profile 自己的
+ * node_modules），任一处缺失就 throw、整个 boot 失败。2026-09-30 实锤：profile 里的
+ * 语音输入 bundle 只在 dsh ≥ 0.1.7 发布过，内置 0.1.5-rc.1 永远解析不了 —— 此时
+ * 「回退到内置版本」不是保底，而是把用户锁死在注定起不来的版本上。所以先问一句。
+ *
+ * 读不到 profile 清单（不存在 / 解析失败）时不阻断，保持原有回退行为。
+ */
+function bundledProfileGaps() {
+  const installRoot = bundledInstallRoot();
+  if (!installRoot) return { ok: true, checked: false, missing: [], reason: '定位不到内置安装根' };
+  return updater.checkProfileBundles({ installRoot, profileDir: profileDir() });
+}
+
 /** 当前实际生效的 dsh 版本：有覆盖版本则用覆盖版本，否则是内置版本。 */
 function currentDshVersion() {
   const state = updater.readState(updateBaseDir());
@@ -432,7 +493,42 @@ function waitForLaunchUrl(timeout = READY_TIMEOUT_MS) {
   });
 }
 
-async function startHarness() {
+/**
+ * 串行化 harness 的「停/起」操作：同一时刻只允许一个启动流程在跑。
+ *
+ * 2026-09-30 实锤：两次 restart 请求在同一秒各自 stop+start，3080 上出现两个 dsh 子进程、
+ * 手机中继同时占了 8787 与 8788。凡改动子进程状态的操作，一律从这里排队。
+ */
+function runHarnessOp(fn) {
+  const run = () => fn();
+  const result = harnessQueue.then(run, run);
+  harnessQueue = result.then(() => undefined, () => undefined);
+  return result;
+}
+
+/** 启动 harness（排队执行）。 */
+function startHarness() {
+  return runHarnessOp(() => startHarnessNow());
+}
+
+/** 先停再起（托盘「重启服务」/ 更新后重启 / 手动回退都走这里，起这一步天然互斥）。 */
+function restartHarness() {
+  // 立刻停：正在等待启动的流程会因为「子进程没了」马上收尾，不必干等 token（最长 120 秒）。
+  // 起这一步再排队，保证同一时刻只有一个子进程被拉起。
+  stopHarness();
+  return runHarnessOp(() => startHarnessNow());
+}
+
+async function startHarnessNow() {
+  if (quitting) {
+    log('startHarness: 正在退出，跳过拉起');
+    return;
+  }
+  // 已有存活子进程：吸收重复的启动请求，不重复拉起
+  if (dshChild && dshChild.exitCode === null && !dshChild.killed) {
+    log('startHarness: 已有存活子进程，跳过本次拉起');
+    return;
+  }
   // 1) 默认端口已有 DSH 实例 → 直接复用，避免双实例并发写 ~/.dsh
   const existing = await probeExistingInstance(DEFAULT_PORT);
   if (existing === 'auth-required') {
@@ -462,12 +558,24 @@ async function startHarness() {
   log('startHarness: port=', dshPort, 'node=', nodePath, 'bin=', bin, 'cwd=', cwd);
 
   // dsh 子进程输出写到日志文件（GUI 应用无控制台，inherit 会弹出 cmd 窗口）
-  const childLogPath = path.join(app.getPath('userData'), 'dsh-child.log');
+  // 每次拉起 dsh 前先按大小轮转，避免崩溃堆栈把日志撑爆
+  const logPath = childLogPath();
   let childLogFd = null;
+  let childLogClosed = false;
+  const closeChildLog = () => {
+    if (childLogClosed) return;
+    childLogClosed = true;
+    try {
+      if (childLogFd != null) fs.closeSync(childLogFd);
+    } catch {
+      /* ignore */
+    }
+  };
   try {
-    // 每次拉起 dsh 前先按大小轮转，避免崩溃堆栈把日志撑爆
-    rotateLogIfTooLarge(childLogPath);
-    childLogFd = fs.openSync(childLogPath, 'a');
+    rotateLogIfTooLarge(logPath);
+    // 记下本次启动在日志里的起点：错误页只展示「本次」的输出，别把上一趟的堆栈当成本次原因
+    childLogStart = fs.existsSync(logPath) ? fs.statSync(logPath).size : 0;
+    childLogFd = fs.openSync(logPath, 'a');
   } catch {
     /* ignore */
   }
@@ -482,6 +590,9 @@ async function startHarness() {
     windowsHide: true, // 关键：隐藏 dsh 子进程的控制台窗口
   });
   dshChild = child;
+  const startedAt = Date.now();
+  // 本次子进程是否成功加载过 UI —— 区分「启动失败」与「运行中途崩溃」的判据
+  let reachedUi = false;
   dshExitPromise = new Promise((resolve) => {
     child.once('exit', () => resolve());
     child.once('error', () => resolve());
@@ -504,33 +615,89 @@ async function startHarness() {
   });
   child.stderr?.on('data', teeToLog);
 
+  // spawn 失败（node.exe 不在 / 被杀软拦下）只触发 'error'、不触发 'exit'：不在这里接住，
+  // 下面那一整套「启动失败 → 回退/重启」判定一次都不会跑，界面要空等 150 秒才报一句
+  // 零信息文案（120 秒 token 等待 + 30 秒就绪探测）。
+  child.on('error', (error) => {
+    closeChildLog();
+    if (dshChild !== child) return;
+    dshChild = null;
+    log('dsh child spawn error:', error.code || '', error.message);
+    if (quitting) return;
+    if (scheduleCrashRestart(`无法启动 dsh 进程（${error.code || error.message}）`)) return;
+    showHarnessErrorPage(`无法启动 dsh 进程：${error.message}`);
+  });
+
   child.on('exit', (code, signal) => {
-    if (childLogFd != null) {
-      try {
-        fs.closeSync(childLogFd);
-      } catch {
-        /* ignore */
-      }
-    }
+    closeChildLog();
     // 陈旧子进程的退出事件（stopHarness 杀掉的旧实例）不是当前实例的失败 → 忽略。
     // 否则更新流程「先 activate 再 stopHarness」会让旧进程的退出被误判为
     // 「覆盖版本启动失败」，当场 deactivate 掉刚激活的新版本（2026-09-24 实锤：
     // 旧进程 SIGTERM 退出后 1ms 就触发回退，覆盖版本从未被拉起过一次）。
     if (dshChild !== child) return;
     dshChild = null;
-    log('dsh child exited: code=', code, 'signal=', signal, 'quitting=', quitting);
+    const uptimeMs = Date.now() - startedAt;
+    log(
+      'dsh child exited: code=', code, 'signal=', signal, 'quitting=', quitting,
+      'uptimeMs=', uptimeMs, 'reachedUi=', reachedUi,
+    );
     if (quitting) return;
-    // 覆盖版本启动失败 → 自动回退到内置版本并重启一次（内置版本是保底），
-    // 只回退一次，避免回退后仍失败时无限重启。
+
+    // 跑够久且真的起过 UI = 健康长跑，清空重启预算（别让偶发崩溃累加成「崩溃循环」）
+    if (reachedUi && uptimeMs >= HEALTHY_UPTIME_MS) crashRestarts = [];
+
+    // 判据必须窄：只有「从未加载过 UI + 仍在启动阶段」才算启动失败（才可能回退版本）。
+    // 「仍在启动阶段」= 未到宽限期，或 token 等待（120 秒）本身还没结束 —— 一个卡了 90 秒
+    // 才崩、从未起过 UI 的进程同样算启动失败，不能因为超过宽限期就永远不回退。
+    // 2026-09-30 实锤：跑满 4.6 小时后的 code=1 静默退出被当成「覆盖版本启动失败」，
+    // 当场 deactivate → 用户被永久锁死在注定起不来的内置版本上。
+    const startupFailure = !reachedUi && (uptimeMs < STARTUP_GRACE_MS || !tokenWaitSettled);
+    if (!startupFailure) {
+      if (scheduleCrashRestart(`运行中途崩溃（code=${code}，已运行 ${Math.round(uptimeMs / 1000)} 秒）`)) return;
+      showHarnessErrorPage(`harness 子进程反复崩溃（code=${code}，signal=${signal}）`);
+      return;
+    }
+
     const overrideState = updater.readState(updateBaseDir());
+    // 覆盖版本启动失败 → 自动回退到内置版本并重启一次（内置版本是保底），只回退一次。
+    // 回退前先确认回退真的有用：内置版本解析不了当前 profile 时，回退等于把用户锁死。
     if (overrideState.activeVersion && !overrideFallbackDone) {
+      const gaps = bundledProfileGaps();
+      if (!gaps.ok) {
+        log('[updater] 覆盖版本启动失败，但内置版本解析不了当前 profile，跳过回退：', gaps.reason);
+        if (scheduleCrashRestart('覆盖版本启动失败（回退无意义）')) return;
+        showHarnessErrorPage(
+          `覆盖版本 dsh v${overrideState.activeVersion} 启动失败；内置版本也无法加载当前 profile（${gaps.reason}）。\n` +
+          `profile 清单：${path.join(profileDir(), 'package.json')}`,
+        );
+        return;
+      }
       overrideFallbackDone = true;
+      fallbackFromVersion = overrideState.activeVersion;
       log('[updater] 覆盖版本启动失败，回退内置版本：', overrideState.activeVersion);
       updater.deactivate(updateBaseDir());
       startHarness().catch((error) => log('fallback restart failed:', error.message));
       return;
     }
-    showErrorPage(`harness 子进程已退出（code=${code}，signal=${signal}）`);
+
+    // 已回退过、内置版本也起不来 → 把覆盖版本恢复回去：宁可回到用户原本能用的版本，
+    // 也不要停在注定起不来的内置版本上（2026-09-30 靠手工改 state.json 才恢复）。
+    // 只恢复一次（用完即把 overrideFallbackDone 置回，避免两个版本互相踢皮球）。
+    if (!overrideState.activeVersion && fallbackFromVersion) {
+      const version = fallbackFromVersion;
+      fallbackFromVersion = null;
+      overrideFallbackDone = true;
+      try {
+        updater.activate(updateBaseDir(), version, { lastResult: 'auto-restored-after-bundled-failure' });
+        log('[updater] 内置版本同样起不来，已恢复覆盖版本：', version);
+        startHarness().catch((error) => log('restore restart failed:', error.message));
+        return;
+      } catch (error) {
+        log('[updater] 恢复覆盖版本失败：', error.message);
+      }
+    }
+
+    showHarnessErrorPage(`harness 子进程已退出（code=${code}，signal=${signal}）`);
   });
 
   const launchUrl = await waitForLaunchUrl(TOKEN_WAIT_TIMEOUT_MS);
@@ -538,20 +705,32 @@ async function startHarness() {
   log('waitForLaunchUrl result=', launchUrl === null ? 'null' : 'token-url');
   if (launchUrl !== null) {
     overrideFallbackDone = false;
+    reachedUi = true;
     await mainWindow.loadURL(launchUrl);
     log('loaded web UI (token)');
     return;
   }
 
+  // 子进程已经退出：不再空等 30 秒就绪探测。退出回调要么已安排好回退/重启，要么已把
+  // 真实原因写上错误页。2026-09-30 事故里这一步空等 30 秒，最后只报出「服务未在预期
+  // 时间内就绪」这句零信息文案，把「子进程一启动就崩」掩盖成了「启动慢」。
+  if (!quitting && dshChild === null) {
+    log('startup aborted: 子进程已退出，跳过就绪探测');
+    return;
+  }
+
   // 兜底：老版本 dsh 不打 token 地址，退回「端口就绪即加载」
-  const ready = await waitForReady(dshPort);
+  const ready = dshChild === null ? false : await waitForReady(dshPort);
   log('waitForReady result=', ready);
   if (ready) {
     overrideFallbackDone = false;
+    reachedUi = true;
     await mainWindow.loadURL(`http://127.0.0.1:${dshPort}/`);
     log('loaded web UI (legacy)');
   } else if (!quitting) {
-    showErrorPage('harness 服务未在预期时间内就绪');
+    showHarnessErrorPage(
+      `harness 服务未在预期时间内就绪（当前 dsh v${currentDshVersion() || '未知'}，端口 ${dshPort} 无监听）`,
+    );
   }
 }
 
@@ -623,6 +802,65 @@ function showErrorPage(message) {
   if (!mainWindow.isVisible()) mainWindow.show();
 }
 
+/** dsh 子进程日志文件路径（拉起子进程与错误页都用它）。 */
+function childLogPath() {
+  return path.join(app.getPath('userData'), 'dsh-child.log');
+}
+
+/** 子进程日志尾部：错误页靠它给出真实原因，而不是一句「服务未就绪」的零信息文案。 */
+function childLogTail(maxLines = 20, maxChars = 2000) {
+  try {
+    const buf = fs.readFileSync(childLogPath());
+    // 从本次启动的起点读起：日志是追加写的，不截断就会把上一趟的堆栈当成本次原因
+    const from = Math.max(0, Math.min(childLogStart, buf.length));
+    const lines = buf
+      .subarray(from)
+      .toString('utf8')
+      .split(/\r?\n/)
+      .filter((line) => line.trim() !== '');
+    const tail = lines.slice(-maxLines).join('\n');
+    // 令牌脱敏：dsh 启动时会把带 token 的地址打到 stdout，而错误页会被截图/贴进 issue
+    const masked = tail.replace(/([?&]token=)[A-Za-z0-9_-]+/g, '$1***');
+    return masked.length > maxChars ? masked.slice(-maxChars) : masked;
+  } catch {
+    return '';
+  }
+}
+
+/** 错误页 + 子进程日志尾部（bundle 解析失败、插件报错等真实原因都在里面）。 */
+function showHarnessErrorPage(message) {
+  const tail = childLogTail();
+  showErrorPage(tail ? `${message}\n\n—— dsh 子进程最后输出 ——\n${tail}` : message);
+}
+
+/**
+ * 运行中途崩溃后的自动重启（限次 + 退避）。返回 false 表示预算已用尽，调用方应报错页。
+ *
+ * 与「回退内置版本」的区别：这里只重启**同一个版本**。中途崩溃多半与版本无关
+ * （外部强杀、内存压力、进程内 abort），先原地重启；连版本状态都不该动。
+ */
+function scheduleCrashRestart(reason) {
+  const now = Date.now();
+  crashRestarts = crashRestarts.filter((ts) => now - ts < CRASH_RESTART_WINDOW_MS);
+  if (crashRestarts.length >= CRASH_RESTART_LIMIT) {
+    log(
+      '[recovery] 自动重启预算用尽（',
+      `${CRASH_RESTART_LIMIT} 次 / ${Math.round(CRASH_RESTART_WINDOW_MS / 60_000)} 分钟）：`,
+      reason,
+    );
+    return false;
+  }
+  crashRestarts.push(now);
+  const attempt = crashRestarts.length;
+  const delayMs = Math.min(30_000, 1000 * 2 ** (attempt - 1));
+  log(`[recovery] ${reason} → ${Math.round(delayMs / 1000)} 秒后按同一版本重启（第 ${attempt}/${CRASH_RESTART_LIMIT} 次）`);
+  setTimeout(() => {
+    if (quitting) return;
+    startHarness().catch((error) => log('crash restart failed:', error.message));
+  }, delayMs);
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // 托盘
 // ---------------------------------------------------------------------------
@@ -652,9 +890,9 @@ function refreshTrayMenu() {
       { label: '显示窗口', click: showWindow },
       {
         label: '重启服务',
-        click: async () => {
-          stopHarness();
-          await startHarness();
+        click: () => {
+          log('restart requested (tray)');
+          restartHarness().catch((error) => log('restart failed:', error.message));
         },
       },
       { type: 'separator' },
@@ -985,9 +1223,9 @@ function buildAppMenu() {
           { label: '显示窗口', click: showWindow },
           {
             label: '重启服务',
-            click: async () => {
-              stopHarness();
-              await startHarness();
+            click: () => {
+              log('restart requested (menu)');
+              restartHarness().catch((error) => log('restart failed:', error.message));
             },
           },
           { type: 'separator' },
@@ -1121,9 +1359,11 @@ async function performUpdate(options = {}) {
 
     if (result.status === 'updated') {
       log('[updater] 激活 v' + result.install.version + '，重启服务');
-      stopHarness();
+      // 新版本 = 新一轮：清掉上一版的回退/重启记忆
       overrideFallbackDone = false;
-      await startHarness();
+      fallbackFromVersion = null;
+      crashRestarts = [];
+      await restartHarness();
       if (!silent) {
         await dialog.showMessageBox(mainWindow, {
           type: 'info',
@@ -1162,11 +1402,25 @@ async function rollbackToBundled() {
   if (!state.activeVersion) {
     return { ok: false, status: 'already-bundled', message: `当前已在运行内置版本 v${bundledDshVersion()}` };
   }
+  // 回退前预检：内置版本解析不了当前 profile 时，回退后必然打不开（2026-09-30 实锤：
+  // 一个「回到内置版本」的点击就能把应用永久锁死）。与其把用户推进坑，不如当场拒绝。
+  const gaps = bundledProfileGaps();
+  if (gaps.checked && !gaps.ok) {
+    log('[updater] 拒绝回退：内置版本解析不了当前 profile ——', gaps.reason);
+    return {
+      ok: false,
+      status: 'profile-mismatch',
+      message:
+        `无法回到内置版本 v${bundledDshVersion()}：它加载不了当前 profile 的 bundle（${gaps.missing.join('、')}）。` +
+        '回退后应用将无法启动，因此已取消。',
+    };
+  }
   updater.deactivate(updateBaseDir());
   log('[updater] 回退到内置版本 v' + bundledDshVersion());
-  stopHarness();
   overrideFallbackDone = false;
-  await startHarness();
+  fallbackFromVersion = null;
+  crashRestarts = [];
+  await restartHarness();
   refreshTrayMenu();
   return { ok: true, status: 'rolled-back', message: `已回到内置版本 v${bundledDshVersion()}` };
 }
@@ -1178,6 +1432,20 @@ async function rollbackToBundledInteractive() {
       type: 'info',
       title: '回到内置版本',
       message: `当前已在运行内置版本 v${bundledDshVersion()}`,
+    });
+    return;
+  }
+  // 注定打不开的回退：不给按钮，直接把原因说清（否则用户点一次就永久打不开）
+  const gaps = bundledProfileGaps();
+  if (gaps.checked && !gaps.ok) {
+    await dialog.showMessageBox(mainWindow, {
+      type: 'warning',
+      title: '不能回到内置版本',
+      message: `内置的 dsh v${bundledDshVersion()} 加载不了当前 profile 的 bundle`,
+      detail:
+        `缺少：${gaps.missing.join('、')}\n\n` +
+        '这些 bundle 只存在于较新的 dsh 版本里，回退后应用会启动失败，因此已取消。' +
+        '确实需要回到内置版本时，请先到「插件管理」里关掉用到它们的插件（如语音输入、Agent Teams）。',
     });
     return;
   }
@@ -1193,7 +1461,11 @@ async function rollbackToBundledInteractive() {
   });
   if (response !== 0) return;
   const result = await rollbackToBundled();
-  await dialog.showMessageBox(mainWindow, { type: 'info', title: '回到内置版本', message: result.message });
+  await dialog.showMessageBox(mainWindow, {
+    type: result.ok ? 'info' : 'warning',
+    title: '回到内置版本',
+    message: result.message,
+  });
 }
 
 // ---------------------------------------------------------------------------

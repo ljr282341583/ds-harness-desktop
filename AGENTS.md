@@ -70,7 +70,7 @@ cd app && npm run build:smoketest # 生成体检专用「隔离命名」安装�
 
 ## 硬约束
 
-1. 内置 dsh 版本是保底：任何更新失败都必须能回到内置版本。
+1. 内置 dsh 版本是保底：任何更新失败都必须能回到内置版本。**但「回退」只在确认内置版本能加载当前 profile 时才执行**（`updater.checkProfileBundles`，判据必须与上游 `dsh-app-boot` 的 `packageDirFromAnchor` 一致）；解析不了就原地重试、不改 `state.json`。同理，「覆盖版本子进程退出」**不等于**「启动失败」——只有「从未加载过 UI 且仍在启动阶段」才算。2026-09-30 事故就是这两条没守住，把用户永久锁死（复盘：`过程记录\2026-10-01-启动失败事故复核与降级判定修复.md`）。
 2. 打包守卫必须保留：拒绝 `@deepseek-ai/dsh-base/cordis.patch.yml` 含 `compression: none` 的构建（会导致读不了 `.jsonl.zstd` 历史会话而闪退）。
 3. `app/runtime/` 不入库、本地初始**只有 `node.exe`、没有 npm**：打包前必须由 `scripts\prepare-runtime.ps1` 补齐（`build` / `build:dir` 已自动前置，smoke [2] 断言侧车含可执行 npm）。「侧车自带 npm」不能作为实现前提。
 4. `~/.dsh` 是共享数据目录：涉及升级或测试时必须用 `DSH_HOME` 重定向到临时目录，不得污染真实凭据与会话。

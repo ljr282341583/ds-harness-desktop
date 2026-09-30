@@ -16,6 +16,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { createRequire } = require('node:module');
 const { spawn } = require('node:child_process');
 const { createServer } = require('node:net');
 
@@ -194,6 +195,74 @@ function checkCompatibility(root) {
     }
   }
   return { ok: true, reason: null };
+}
+
+// ---------------------------------------------------------------------------
+// profile 依赖预检（回退/降级前问一句「回退真的有用吗」）
+// ---------------------------------------------------------------------------
+
+/**
+ * 预检：某个 dsh 安装能不能解析 profile 的 `dsh.profile.bundles` 列表。
+ *
+ * 判据必须与上游 `dsh-app-boot` 的 `packageDirFromAnchor` **完全一致**，否则会假报
+ * 「缺 bundle」，把本来能用的回退也拒掉：
+ *
+ *   for (const searchPath of createRequire(anchor).resolve.paths(name) ?? []) {
+ *     if (existsSync(join(searchPath, name, 'package.json'))) → 命中
+ *   }
+ *
+ * 锚点两处、有先后：内置安装的 dsh 包 package.json → profile 目录的 package.json。
+ * 注意这是 Node 的 node_modules **父目录链**，所以 `$DSH_HOME/profiles/node_modules`
+ * （本机是 junction 指向 npm 全局树）与「dsh 包内嵌 node_modules」也算命中 ——
+ * 只盯 `<installRoot>/node_modules` 与 `<profileDir>/node_modules` 两个目录会漏。
+ *
+ * 两处都解析不到 → 该版本启动时必抛 `dsh: cannot resolve profile bundle …`，整个 boot
+ * 失败（上游不会跳过缺失 bundle）。用途：回退/降级前的预检。2026-09-30 实锤：profile
+ * 里有一个只在 dsh ≥ 0.1.7 发布过的 bundle，而壳的「保底」内置版本是 0.1.5-rc.1 ——
+ * 回退过去必然起不来，于是「保底」变成了永久锁死。
+ *
+ * 读不到 profile 清单（不存在 / JSON 坏了）时返回 `checked: false`，不阻断调用方。
+ */
+function checkProfileBundles(options = {}) {
+  const { installRoot, profileDir } = options;
+  if (!installRoot || !profileDir) {
+    return { ok: true, checked: false, missing: [], reason: '缺少 installRoot / profileDir' };
+  }
+  let bundles;
+  try {
+    const manifest = JSON.parse(fs.readFileSync(path.join(profileDir, 'package.json'), 'utf8'));
+    bundles = Array.isArray(manifest?.dsh?.profile?.bundles) ? manifest.dsh.profile.bundles : [];
+  } catch (error) {
+    return { ok: true, checked: false, missing: [], reason: `读不到 profile 清单：${error.message}` };
+  }
+
+  // 与上游同序的两个锚点
+  const anchors = [
+    path.join(installRoot, 'node_modules', PKG_NAME, 'package.json'),
+    path.join(profileDir, 'package.json'),
+  ];
+  const resolvable = (packageName) => {
+    for (const anchor of anchors) {
+      let searchPaths = [];
+      try {
+        searchPaths = createRequire(anchor).resolve.paths(packageName) ?? [];
+      } catch {
+        searchPaths = [];
+      }
+      for (const searchPath of searchPaths) {
+        if (fs.existsSync(path.join(searchPath, packageName, 'package.json'))) return true;
+      }
+    }
+    return false;
+  };
+
+  const missing = bundles.filter((name) => !resolvable(String(name)));
+  return {
+    ok: missing.length === 0,
+    checked: true,
+    missing,
+    reason: missing.length > 0 ? `缺少 bundle：${missing.join('、')}` : null,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -587,6 +656,7 @@ module.exports = {
   resolveActiveRoot,
   readPackageVersion,
   checkCompatibility,
+  checkProfileBundles,
   installVersion,
   SMOKE_ENV_ALLOWLIST,
   minimalSmokeEnv,

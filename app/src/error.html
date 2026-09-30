@@ -15,9 +15,20 @@
         color: #e6e8ee;
         font-family: system-ui, "Segoe UI", "Microsoft YaHei", sans-serif;
       }
-      .box { max-width: 460px; text-align: center; padding: 24px; }
+      .box { max-width: 560px; text-align: center; padding: 24px; }
       h1 { font-size: 18px; margin: 0 0 12px; }
-      .msg { font-size: 14px; color: #9aa3b2; word-break: break-all; margin-bottom: 24px; }
+      /* 错误信息里会带 dsh 子进程日志尾部（多行堆栈）：保留换行、左对齐、超高可滚 */
+      .msg {
+        font-size: 13px;
+        line-height: 1.55;
+        color: #9aa3b2;
+        word-break: break-all;
+        white-space: pre-wrap;
+        text-align: left;
+        max-height: 45vh;
+        overflow: auto;
+        margin-bottom: 24px;
+      }
       button {
         padding: 10px 22px;
         font-size: 14px;
