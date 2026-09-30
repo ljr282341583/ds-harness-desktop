@@ -11,6 +11,9 @@
  *   npm run verify:smoke -- --audit-stash # 只演练「暂存/还原本机卸载键」，不跑安装器
  *   npm run build / build:dir          # 打包脚本已挂本体检（打包成功即自动执行）
  *
+ * 环境变量：
+ *   DSH_SMOKE_EXTRA_ARGS  体检拉起的隔离实例的额外启动参数（如 `--no-sandbox`，见其函数注释）
+ *
  * 步骤：
  *   [1] 离线单测：复用 test/updater.test.js（版本比较 / 通道 / 守卫 / 状态 / 环境收敛）
  *   [2] 静态检查：侧车 Node ≥ 22、侧车含可执行 npm（应用内 dsh 更新的前提，
@@ -66,6 +69,26 @@ const REAL_APP_EXE_NAME = 'DS Harness Desktop.exe';
 const REAL_SHORTCUT_NAME = 'DS Harness Desktop';
 const smoketestDir = path.join(outDir, 'smoketest');
 const smoketestManifestPath = path.join(smoketestDir, 'smoketest.json');
+
+/**
+ * 体检自己拉起的实例的额外启动参数，来自 `DSH_SMOKE_EXTRA_ARGS`（空格分隔）。
+ *
+ * 为什么要这个口子：本机 A机 在 **agent 会话**里启动 Electron 必须加 `--no-sandbox`，
+ * 否则秒退 `0x80000003`（`STATUS_BREAKPOINT`，Chromium 沙箱初始化失败）——这是执行环境
+ * 限制、与产物无关（2026-09-25 首次定位；2026-10-01 用 A/B 复证：打过补丁的产物与未打
+ * 补丁的正式版在同一环境下表现一致）。有了这个参数，[4]/[5] 在本机就能给出**可信绿灯**，
+ * 不必再靠「报红不代表产物坏」的口头豁免。
+ *
+ * 只作用于**隔离实例**（隔离端口 / userData / DSH_HOME / 不抢单实例锁），不碰真实安装与
+ * 真实 `~/.dsh`；CI（普通 runner）不需要也不设这个变量。
+ *
+ * 用法：`$env:DSH_SMOKE_EXTRA_ARGS='--no-sandbox'; npm run verify:smoke -- --packaged`
+ */
+function extraLaunchArgs() {
+  return String(process.env.DSH_SMOKE_EXTRA_ARGS || '')
+    .split(/\s+/)
+    .filter(Boolean);
+}
 
 // 若存在「隔离命名」体检构建（npm run build:smoketest 的产物 + 清单），[5] 优先使用它：
 // 它的 exe 名、进程名、快捷方式名、注册表键名都与真实安装不同——隔离不再依赖"事后还原"。
@@ -245,7 +268,7 @@ async function launchAndProbe(exePath, launchCwd, env, options = {}) {
   let rawOut = '';
   let exitInfo = null;
   try {
-    child = spawn(exePath, [], {
+    child = spawn(exePath, extraLaunchArgs(), {
       cwd: launchCwd,
       env,
       windowsHide: true,
