@@ -22,8 +22,8 @@
 
 | 版本 | 下载 | 说明 |
 |---|---|---|
-| 安装版（推荐） | [DS-Harness-Desktop-Setup-0.3.8.exe](https://github.com/ljr282341583/ds-harness-desktop/releases/download/v0.3.8/DS-Harness-Desktop-Setup-0.3.8.exe) | 向导安装（**可自选安装目录**），带开始菜单 / 桌面快捷方式 / 卸载入口；**支持托盘一键自更新** |
-| 便携版 | [DS-Harness-Desktop-0.3.8-portable.exe](https://github.com/ljr282341583/ds-harness-desktop/releases/download/v0.3.8/DS-Harness-Desktop-0.3.8-portable.exe) | 免安装单文件，双击即用，适合拷贝分发；每次启动需自解压，且**无法原地自更新**（会引导手动下载新文件） |
+| 安装版（推荐） | [DS-Harness-Desktop-Setup-0.3.9.exe](https://github.com/ljr282341583/ds-harness-desktop/releases/download/v0.3.9/DS-Harness-Desktop-Setup-0.3.9.exe) | 向导安装（**可自选安装目录**），带开始菜单 / 桌面快捷方式 / 卸载入口；**支持托盘一键自更新** |
+| 便携版 | [DS-Harness-Desktop-0.3.9-portable.exe](https://github.com/ljr282341583/ds-harness-desktop/releases/download/v0.3.9/DS-Harness-Desktop-0.3.9-portable.exe) | 免安装单文件，双击即用，适合拷贝分发；每次启动需自解压，且**无法原地自更新**（会引导手动下载新文件） |
 
 > 想找历史版本或全部资产（含 `latest.yml`），见 [Releases 列表](https://github.com/ljr282341583/ds-harness-desktop/releases)。
 
@@ -163,7 +163,7 @@ GitHub Actions（`.github/workflows/release.yml`）会同步版本号、安装�
 - 项目名称：DS Harness Desktop（ds-harness-desktop）
 - 创建日期：2026-08-14
 - 项目目标：为 DeepSeek Harness（`@deepseek-ai/dsh`，Node.js + Cordis 插件化 Agent Harness）提供一个桌面端形态。DSH 以 `dsh web` 启动本地 Web 服务器（webserver + 前端静态资源 + apiproxy），桌面版把这套能力装进原生窗口，并保留完整工具链。
-- 当前状态：v0.3.8 已发布（NSIS 安装器 + portable 便携版；两层更新、打 tag 自动发版流水线与真机自更新均已实测验证；应用内 dsh 更新「激活后秒回退」缺陷已修复；v0.3.8 起内置「手机访问」中继与扫码配对入口）
+- 当前状态：v0.3.9 已发布（NSIS 安装器 + portable 便携版；两层更新、打 tag 自动发版流水线与真机自更新均已实测验证；应用内 dsh 更新「激活后秒回退」缺陷已修复；v0.3.8 起内置「手机访问」中继与扫码配对入口；v0.3.9 起「降级判定」不再把运行中途崩溃误判为版本启动失败，回退内置版本前先按上游判据预检 profile 依赖，避免被永久锁死）
 - 验收标准：见 `docs\设计方案.md` 第 6 节
 
 ## 变更记录
@@ -188,3 +188,4 @@ GitHub Actions（`.github/workflows/release.yml`）会同步版本号、安装�
 | 2026-09-23 | 发布 v0.3.6：更新反馈三件套生效（下载完成「立即重启并安装」/ 下载失败弹窗 / 下载中「正在下载桌面端 vX…」文案）；本地产物侧车含可执行 npm，应用内「检查 dsh 更新」恢复可用 |
 | 2026-09-25 | 发布 v0.3.7：**修复应用内「检查 dsh 更新」的覆盖版本从未真正生效**——`child.on('exit')` 不区分退出的是哪个子进程，旧进程退出被误判为「覆盖版本启动失败」，激活后 1ms 即回退内置版（09-12、09-20×2、09-24 共 4 次尝试全部同因失败）；加子进程身份守卫后实机验证托盘「重启服务」不再回退 |
 | 2026-09-25 | 发布 v0.3.8：**内置「手机访问」** —— 中继跑在主进程内、随桌面端起停（不再需要另开命令行窗口、不留孤儿进程）；托盘与窗口菜单（按 `Alt` 唤出）新增「手机访问」：显示配对二维码 / 复制手机地址 / 开关 / 用 IP 画码；中继只绑尾网地址、不持有任何凭据。详见 `过程记录\2026-09-25-手机访问中继内置到桌面端.md` |
+| 2026-10-01 | 发布 v0.3.9：**修复「运行中途崩溃被误判为覆盖版本启动失败」导致的永久打不开**（2026-09-30 事故根因）—— 判据收窄为「从未加载过 UI 且仍在启动阶段」，中途崩溃改为同版本限次退避重启、不再改动 `state.json`；回退内置版本前先按上游判据预检 profile bundle（解析不了就不回退）；回退后内置版也起不来时自动恢复覆盖版本；错误页附子进程日志尾部（令牌脱敏）；重启加互斥。详见 `过程记录\2026-10-01-启动失败事故复核与降级判定修复.md` |
