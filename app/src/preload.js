@@ -12,6 +12,8 @@ contextBridge.exposeInMainWorld('dshDesktop', {
   checkForUpdates: () => ipcRenderer.invoke('dsh:update-check'),
   setUpdateChannel: (channel) => ipcRenderer.invoke('dsh:update-channel', channel),
   rollbackToBundled: () => ipcRenderer.invoke('dsh:update-rollback'),
+  rollbackToPrevious: () => ipcRenderer.invoke('dsh:update-rollback-previous'),
+  openProfileDir: () => ipcRenderer.invoke('dsh:open-profile-dir'),
   checkShellUpdate: () => ipcRenderer.invoke('dsh:shell-update-check'),
   installShellUpdate: () => ipcRenderer.invoke('dsh:shell-update-install'),
   // 手机访问：配对二维码小窗用；状态/开关也可给主界面用

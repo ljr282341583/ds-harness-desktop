@@ -153,11 +153,57 @@ if (process.env.DSH_DESKTOP_USER_DATA) {
 const gotLock = process.env.DSH_DESKTOP_SMOKE === '1' || app.requestSingleInstanceLock();
 
 if (!gotLock) {
-  app.quit();
+  // 「双击了没反应」的经典现场：另一个实例（往往还是另一份构建，比如旧安装版）占着同一个
+  // 用户数据目录，本实例拿不到锁 → 立刻退出、不弹任何窗口。这里必须明确说一句。
+  announceSecondInstance();
 } else {
-  app.on('second-instance', () => showWindow());
+  app.on('second-instance', (_event, argv) => {
+    log('[single-instance] 收到另一个实例的启动请求，聚焦已有窗口；对方入口 =', describeEntry(argv));
+    showWindow();
+  });
   app.whenReady().then(bootstrap).catch((err) => {
     console.error('[dsh-desktop] bootstrap failed:', err);
+    app.quit();
+  });
+}
+
+/** 从 Electron 传进来的 argv 里取出「对方是哪个入口启动的」，供日志与提示用。 */
+function describeEntry(argv) {
+  const list = Array.isArray(argv) ? argv.filter((item) => typeof item === 'string' && item.trim() !== '') : [];
+  return list[0] || '未知';
+}
+
+/**
+ * 没拿到单实例锁时给出的说明（否则用户只看到「点了没反应」）。
+ *
+ * 典型场景：尝鲜解压版 vs 已安装版，两份壳共用 `%APPDATA%\ds-harness-desktop`，
+ * 于是后启动的那份静默退出、旧窗口被叫到前面，看起来像程序坏了。
+ */
+function announceSecondInstance() {
+  const detail =
+    `同一个用户数据目录（${app.getPath('userData')}）下已经有一个实例在运行，` +
+    '本实例按单实例策略直接退出，所以不会有新窗口出现。\n\n' +
+    `本次启动的入口：${process.execPath}\n` +
+    `本次安装位置：${app.getAppPath()}\n\n` +
+    '如果你在试新打出来的版本（例如 dist\\\\win-unpacked），请先到托盘右键「退出」旧实例，再启动这一份。';
+  try {
+    log('[single-instance] 未取得实例锁，退出：', process.execPath);
+  } catch {
+    /* 日志目录未就绪时忽略 */
+  }
+  app.whenReady().then(() => {
+    try {
+      dialog.showMessageBoxSync({
+        type: 'info',
+        title: '已有实例在运行',
+        message: 'DS Harness Desktop 已在运行，本次启动的实例已退出',
+        detail,
+        buttons: ['知道了'],
+        noLink: true,
+      });
+    } catch (error) {
+      console.error('[single-instance] 提示弹窗失败：', error && error.message);
+    }
     app.quit();
   });
 }
@@ -219,6 +265,8 @@ async function bootstrap() {
     return describeVersions();
   });
   ipcMain.handle('dsh:update-rollback', async () => rollbackToBundled());
+  ipcMain.handle('dsh:update-rollback-previous', async () => rollbackToPrevious());
+  ipcMain.handle('dsh:open-profile-dir', async () => openProfileDir());
   ipcMain.handle('dsh:shell-update-check', async () => checkShellUpdate({ silent: true }));
   ipcMain.handle('dsh:shell-update-install', async () => installShellUpdate());
 
@@ -950,6 +998,15 @@ function refreshTrayMenu() {
         },
       },
       {
+        label: info.previousVersion && info.previousVersion !== info.activeVersion
+          ? `回到上一个版本（v${info.previousVersion}）`
+          : '回到上一个版本',
+        enabled: Boolean(info.previousVersion) && info.previousVersion !== info.activeVersion && !updateInProgress,
+        click: () => {
+          rollbackToPreviousInteractive().catch((error) => log('[updater] 回退异常：', error.message));
+        },
+      },
+      {
         label: '回到内置版本',
         enabled: Boolean(info.activeVersion) && !updateInProgress,
         click: () => {
@@ -1337,8 +1394,9 @@ async function performUpdate(options = {}) {
         detail:
           `当前版本：v${current}\n目标版本：v${check.target}（${check.tag} 通道）\n` +
           `发布时间：${check.publishedAt ? new Date(check.publishedAt).toLocaleString() : '未知'}\n\n` +
-          '更新会下载到用户数据目录，经启动冒烟验证通过后才启用；失败会自动保留当前版本，' +
-          '不会影响 ~/.dsh 中的会话与凭据。下载安装可能需要 1–3 分钟。',
+          '更新会下载到用户数据目录，先做启动冒烟、再用你当前的 profile 做一次预检，' +
+          '两关都过才启用；任一关失败都会保持当前版本，不会影响 ~/.dsh 中的会话与凭据。' +
+          '下载安装可能需要 1–3 分钟。',
       });
       if (response !== 0) return { ok: false, status: 'cancelled', check, message: '已取消更新' };
     }
@@ -1349,6 +1407,7 @@ async function performUpdate(options = {}) {
       npmCliPath,
       currentVersion: current,
       channel: state.channel,
+      // 冒烟与 profile 预检都用真实运行时的 cwd，避免「换个目录结论就变」
       cwd: resolveCwd(),
       log: (...args) => log('[updater]', ...args),
       onProgress: (message) => {
@@ -1376,10 +1435,12 @@ async function performUpdate(options = {}) {
     }
 
     if (!silent) {
+      const problems = result.profile && Array.isArray(result.profile.problems) ? result.profile.problems : [];
       await dialog.showMessageBox(mainWindow, {
         type: result.status === 'error' ? 'warning' : 'info',
-        title: '检查更新',
+        title: result.stage === 'profile-precheck' ? '新版本与你的 profile 不兼容' : '检查更新',
         message: result.message,
+        ...(problems.length > 0 ? { detail: problems.join('\n') } : {}),
       });
     }
     return { ok: false, ...result };
@@ -1466,6 +1527,73 @@ async function rollbackToBundledInteractive() {
     title: '回到内置版本',
     message: result.message,
   });
+}
+
+// ---------------------------------------------------------------------------
+// 回到上一个版本 —— 两个覆盖版本之间的切换
+// ---------------------------------------------------------------------------
+//
+// 「回到内置版本」救不了 2026-10-28 那类事故（内置 0.1.5-rc.1 根本解析不了 0.2.x 的
+// profile），能救人的是「退回刚才那个引擎版本」。state.previousVersion 一直在维护，
+// 这里只是把它变成一键操作，顺带让错误页也有出口。
+
+async function rollbackToPrevious(options = {}) {
+  const baseDir = updateBaseDir();
+  const state = updater.readState(baseDir);
+  const target = state.previousVersion;
+  if (!target || target === state.activeVersion) {
+    return { ok: false, status: 'no-previous', message: '没有可回退的上一个版本' };
+  }
+  const result = updater.rollbackToPrevious(baseDir);
+  if (!result.ok) return { ok: false, status: 'error', message: result.reason };
+  log(`[updater] 回退到上一个版本 v${target}（原 v${state.activeVersion || '内置'}）`);
+  // 换版本 = 新一轮：清掉崩溃重启与回退记忆
+  overrideFallbackDone = false;
+  fallbackFromVersion = null;
+  crashRestarts = [];
+  if (options.restart !== false) await restartHarness();
+  refreshTrayMenu();
+  return { ok: true, status: 'rolled-back', version: target, message: `已回退到 v${target}` };
+}
+
+async function rollbackToPreviousInteractive() {
+  const state = updater.readState(updateBaseDir());
+  const target = state.previousVersion;
+  if (!target || target === state.activeVersion) {
+    await dialog.showMessageBox(mainWindow, {
+      type: 'info',
+      title: '回到上一个版本',
+      message: '没有可回退的上一个版本',
+    });
+    return;
+  }
+  const { response } = await dialog.showMessageBox(mainWindow, {
+    type: 'question',
+    buttons: [`回到 v${target}`, '取消'],
+    defaultId: 0,
+    cancelId: 1,
+    title: '回到上一个版本',
+    message: `当前使用 dsh v${state.activeVersion || bundledDshVersion()}，将切回 v${target}`,
+    detail:
+      '适用于「新引擎与你的插件不兼容」这类情况：退回后现场保持原样，' +
+      '两个版本目录都留着，随时可以再切回来。不会影响 ~/.dsh 中的会话与凭据。',
+  });
+  if (response !== 0) return;
+  const result = await rollbackToPrevious();
+  await dialog.showMessageBox(mainWindow, {
+    type: result.ok ? 'info' : 'warning',
+    title: '回到上一个版本',
+    message: result.message,
+  });
+}
+
+/** 打开 profile 目录（错误页/托盘排障用）。目录不存在时退到它的上级。 */
+async function openProfileDir() {
+  const dir = profileDir();
+  const target = fs.existsSync(dir) ? dir : path.dirname(dir);
+  const error = await shell.openPath(target);
+  if (error) log('[updater] 打开 profile 目录失败：', error);
+  return { ok: !error, path: target, message: error || null };
 }
 
 // ---------------------------------------------------------------------------

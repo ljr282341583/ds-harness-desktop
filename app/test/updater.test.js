@@ -352,6 +352,114 @@ console.log('\n[3] checkForUpdate 判定');
   });
 
   // -------------------------------------------------------------------------
+  console.log('\n[8] profile 预检（dump-config 输出判定 + 候选版本实跑）');
+  // -------------------------------------------------------------------------
+
+  test('干净输出 + 退出码 0 → 通过', () => {
+    const r = updater.analyzeProfileReport('dsh: profile composed\n- id: tools\n', 0);
+    assert.equal(r.ok, true);
+    assert.deepEqual(r.problems, []);
+    assert.equal(r.reason, null);
+  });
+
+  test('出现 disabling profile plugin row → 不通过（这是 2026-10-28 的现场）', () => {
+    const text = [
+      'dsh: disabling profile plugin row "tools": Plugin @deepseek-ai/dsh-tools@0.2.0-rc.2 is incompatible with dsh 0.2.1-rc.4: requirements {"@deepseek-ai/dsh-agent":"0.2.0-rc.2"}',
+      'dsh: startup failed: 1 required plugin did not activate',
+    ].join('\n');
+    const r = updater.analyzeProfileReport(text, 1);
+    assert.equal(r.ok, false);
+    assert.ok(r.problems.length >= 1);
+    assert.match(r.problems[0], /disabling profile plugin row/i);
+  });
+
+  test('stdout/stderr 重复的同一行只记一次', () => {
+    const line = 'dsh: startup failed: 1 required plugin did not activate';
+    const r = updater.analyzeProfileReport(`${line}\n${line}\n`, 1);
+    assert.equal(r.problems.length, 1);
+  });
+
+  test('无已知标记但退出码非 0 → 不通过，原因带退出码', () => {
+    const r = updater.analyzeProfileReport('some unrelated warning', 3);
+    assert.equal(r.ok, false);
+    assert.match(r.reason, /退出码 3/);
+  });
+
+  await testAsync('precheckProfile：假版本能起 → 通过', async () => {
+    const base = tmpRoot('precheck-ok');
+    const root = fakeVersionTree(base, '1.2.3');
+    const r = await updater.precheckProfile({ root, nodePath: process.execPath, cwd: os.tmpdir() });
+    assert.equal(r.ok, true, JSON.stringify(r));
+    fs.rmSync(base, { recursive: true, force: true });
+  });
+
+  await testAsync('precheckProfile：假版本报不兼容 → 不通过并带证据行', async () => {
+    const base = tmpRoot('precheck-bad');
+    const root = fakeVersionTree(base, '1.2.3');
+    const bin = path.join(root, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js');
+    fs.writeFileSync(
+      bin,
+      'console.error("dsh: disabling profile plugin row \\"tools\\": Plugin @deepseek-ai/dsh-tools@0.2.0-rc.2 is incompatible with dsh 0.2.1-rc.4");\nprocess.exit(1);\n',
+      'utf8',
+    );
+    const r = await updater.precheckProfile({ root, nodePath: process.execPath, cwd: os.tmpdir() });
+    assert.equal(r.ok, false);
+    assert.ok(r.problems.length >= 1);
+    fs.rmSync(base, { recursive: true, force: true });
+  });
+
+  await testAsync('precheckProfile：安装根不存在 → 立即失败不抛', async () => {
+    const r = await updater.precheckProfile({});
+    assert.equal(r.ok, false);
+    assert.match(String(r.reason), /安装根/);
+  });
+
+  // -------------------------------------------------------------------------
+  console.log('\n[9] 回到上一个版本（两个覆盖版本之间切换）');
+  // -------------------------------------------------------------------------
+
+  test('没有上一个版本 → 拒绝', () => {
+    const base = tmpRoot('rollback-none');
+    fakeVersionTree(base, '0.2.1-rc.4');
+    updater.activate(base, '0.2.1-rc.4');
+    const r = updater.rollbackToPrevious(base);
+    assert.equal(r.ok, false);
+    fs.rmSync(base, { recursive: true, force: true });
+  });
+
+  test('回退后两个版本互换，且目录都还在', () => {
+    const base = tmpRoot('rollback-ok');
+    fakeVersionTree(base, '0.2.0-rc.2');
+    fakeVersionTree(base, '0.2.1-rc.4');
+    updater.activate(base, '0.2.0-rc.2');
+    updater.activate(base, '0.2.1-rc.4');
+    const r = updater.rollbackToPrevious(base);
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(r.version, '0.2.0-rc.2');
+    const state = updater.readState(base);
+    assert.equal(state.activeVersion, '0.2.0-rc.2');
+    assert.equal(state.previousVersion, '0.2.1-rc.4');
+    // 再点一次能切回去
+    const back = updater.rollbackToPrevious(base);
+    assert.equal(back.ok, true);
+    assert.equal(updater.readState(base).activeVersion, '0.2.1-rc.4');
+    fs.rmSync(base, { recursive: true, force: true });
+  });
+
+  test('上一个版本的目录被删掉 → 拒绝且不改 state', () => {
+    const base = tmpRoot('rollback-missing');
+    fakeVersionTree(base, '0.2.0-rc.2');
+    fakeVersionTree(base, '0.2.1-rc.4');
+    updater.activate(base, '0.2.0-rc.2');
+    updater.activate(base, '0.2.1-rc.4');
+    fs.rmSync(updater.versionRoot(base, '0.2.0-rc.2'), { recursive: true, force: true });
+    const r = updater.rollbackToPrevious(base);
+    assert.equal(r.ok, false);
+    assert.equal(updater.readState(base).activeVersion, '0.2.1-rc.4');
+    fs.rmSync(base, { recursive: true, force: true });
+  });
+
+  // -------------------------------------------------------------------------
   const runE2E = process.argv.includes('--e2e');
   if (runE2E) {
     console.log('\n[8] 端到端：真实下载安装 + 冒烟验证 + 激活 + 回滚');
@@ -372,6 +480,8 @@ console.log('\n[3] checkForUpdate 判定');
           npmCliPath: npmCli,
           currentVersion: '0.1.5-rc.1',
           channel: 'preview',
+          // 预检也留在隔离 home 里：别拿开发者真实的 ~/.dsh 当试验场
+          home: path.join(e2eRoot, 'home'),
           log: (m) => console.log(`       | ${m}`),
         });
         assert.equal(result.status, 'updated', JSON.stringify(result).slice(0, 400));

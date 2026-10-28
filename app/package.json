@@ -13,6 +13,7 @@
     "test": "node test/updater.test.js",
     "test:e2e": "node test/updater.test.js --e2e",
     "verify:smoke": "node test/smoke.test.js",
+    "verify:profile": "node scripts/verify-profile.js",
     "build:smoketest": "node scripts/build-smoketest.js"
   },
   "dependencies": {

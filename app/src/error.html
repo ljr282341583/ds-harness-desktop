@@ -29,6 +29,12 @@
         overflow: auto;
         margin-bottom: 24px;
       }
+      .actions {
+        display: flex;
+        gap: 10px;
+        justify-content: center;
+        flex-wrap: wrap;
+      }
       button {
         padding: 10px 22px;
         font-size: 14px;
@@ -39,27 +45,70 @@
         cursor: pointer;
       }
       button:hover { background: #3d79e8; }
+      button:disabled { opacity: 0.55; cursor: default; }
+      button.secondary {
+        background: transparent;
+        border: 1px solid #2f3644;
+        color: #c8cedb;
+      }
+      button.secondary:hover { background: #1a1f29; }
     </style>
   </head>
   <body>
     <div class="box">
       <h1>DeepSeek Harness 服务不可用</h1>
       <div class="msg" id="message">未知错误</div>
-      <button id="retry" type="button">重启服务</button>
+      <div class="actions">
+        <button id="retry" type="button">重启服务</button>
+        <button id="rollback" type="button" hidden>回到上一个版本</button>
+        <button id="openProfile" type="button" class="secondary">打开 profile 目录</button>
+      </div>
     </div>
     <script>
-      async function loadError() {
-        if (window.dshDesktop && typeof window.dshDesktop.getError === 'function') {
-          const message = await window.dshDesktop.getError();
+      const api = window.dshDesktop;
+
+      /** 回退/重启用：点完立刻禁用，避免连点造成两次停机。 */
+      function runOnce(button, action) {
+        if (!button || !api) return;
+        button.addEventListener('click', () => {
+          button.disabled = true;
+          try {
+            action();
+          } finally {
+            setTimeout(() => {
+              button.disabled = false;
+            }, 3000);
+          }
+        });
+      }
+
+      async function init() {
+        if (!api) return;
+        try {
+          const message = typeof api.getError === 'function' ? await api.getError() : null;
           if (message) document.getElementById('message').textContent = message;
+        } catch {
+          /* 错误信息拿不到时保留占位文案 */
+        }
+        // 「回到上一个版本」只在真有上一版本、且和当前不同的时候出现：
+        // 2026-10-28 那次升级事故里，内置版本救不了人，能救人的就是这一条。
+        try {
+          const info = typeof api.getVersions === 'function' ? await api.getVersions() : null;
+          const previous = info && info.previousVersion;
+          if (previous && previous !== info.activeVersion) {
+            const button = document.getElementById('rollback');
+            button.textContent = `回到 v${previous}`;
+            button.hidden = false;
+            runOnce(button, () => api.rollbackToPrevious());
+          }
+        } catch {
+          /* 拿不到版本信息就只保留重启 */
         }
       }
-      document.getElementById('retry').addEventListener('click', () => {
-        if (window.dshDesktop && typeof window.dshDesktop.restart === 'function') {
-          window.dshDesktop.restart();
-        }
-      });
-      loadError();
+
+      runOnce(document.getElementById('retry'), () => api && api.restart());
+      runOnce(document.getElementById('openProfile'), () => api && api.openProfileDir());
+      init();
     </script>
   </body>
 </html>
