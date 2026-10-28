@@ -21,7 +21,7 @@
  *       内置 dsh 版本与声明精确一致（无 ^）、compression: none 两处守卫都在位
  *   [3] 侧车启动冒烟：runtime/node.exe 拉起内置 dsh web，临时 DSH_HOME，
  *       等到带 token 的启动地址（复用 updater.smokeTest，与更新器同一套判定）
- *   [4] 打包产物启动冒烟：无窗口拉起 产出/win-unpacked 的 exe，等端口真正监听
+ *   [4] 打包产物启动冒烟：无窗口拉起 dist/win-unpacked 的 exe，等端口真正监听
  *       且进程仍存活 —— 最接近「更新完还打得开吗」的一步
  *   [5] 安装器端到端：NSIS 安装包静默装进临时目录 → 启动 → 端口监听 → 卸载还原。
  *       安装包缺失或比 win-unpacked 旧 → SKIP（build:dir 不产安装包，用 npm run build）。
@@ -32,7 +32,7 @@
  *       temp 安装一律带 `/currentuser`（模板 assistedInstaller.nsh L129-133 支持该参数）：
  *       强制落在每用户命名空间（HKCU + 用户级快捷方式），不写公共桌面/HKLM，从接触面上
  *       隔离真实安装；安装后打印它实际注册到哪个 hive，隔离是否成立当场可见。
- *       若存在 `npm run build:smoketest` 的「隔离命名」构建（产出\smoketest\ + 清单），[5]
+ *       若存在 `npm run build:smoketest` 的「隔离命名」构建（dist\smoketest\ + 清单），[5]
  *       优先用它：exe 名/进程名/快捷方式名/注册表键名与真实安装完全不重叠，隔离彻底。
  *       安装含一次瞬时失败重试 + 600s 超时；若连续秒崩/超时（本机 NSIS .onInit 插件相位
  *       间歇性不稳定，见 NEXT「Setup 双击崩溃」）按环境问题 SKIP 并显著告警，不记产物回归。
@@ -62,7 +62,7 @@ const updater = require('../src/updater.js');
 
 const appDir = path.join(__dirname, '..');
 const repoDir = path.join(appDir, '..');
-const outDir = path.join(repoDir, '产出');
+const outDir = path.join(repoDir, 'dist');
 const packedDir = path.join(outDir, 'win-unpacked');
 const requirePackaged = process.argv.includes('--packaged');
 const REAL_APP_EXE_NAME = 'DS Harness Desktop.exe';
@@ -427,7 +427,7 @@ function restoreShortcuts(snap, backupDir) {
   return failures;
 }
 
-/** 体检用 NSIS 安装包：隔离构建优先（产出\smoketest\），否则 产出\ 下最新的 *Setup*.exe。 */
+/** 体检用 NSIS 安装包：隔离构建优先（dist\smoketest\），否则 dist\ 下最新的 *Setup*.exe。 */
 function newestInstaller() {
   const scanDir = ISOLATED_BUILD ? smoketestDir : outDir;
   if (!fs.existsSync(scanDir)) return null;
@@ -713,7 +713,7 @@ function assertNoVisibleUninstallKeys(stage) {
 /**
  * 零风险自检：不跑安装器，只演练「扫描 → 暂存 → 复查 → 还原 → 再复查」，
  * 回答"防护网真的能挡住误删吗"。用法：npm run verify:smoke -- --audit-stash
- * 会临时删除本机卸载键并随即导回；若中途被打断，用 产出\reg-backup-*\*.reg 手工导回。
+ * 会临时删除本机卸载键并随即导回；若中途被打断，用 dist\reg-backup-*\*.reg 手工导回。
  */
 async function auditStashSafety() {
   console.log('\n[自检] 暂存/还原演练（不启动任何安装器、不碰应用文件）');
@@ -876,7 +876,7 @@ async function main() {
   }
 
   if (!exePath) {
-    const reason = '未找到 产出/win-unpacked/*.exe，先跑 npm run build:dir 再验证';
+    const reason = '未找到 dist/win-unpacked/*.exe，先跑 npm run build:dir 再验证';
     if (requirePackaged) {
       await step('打包产物存在', () => assert.fail(reason));
     } else {
@@ -941,7 +941,7 @@ async function main() {
       `检测到 ${foreignCount} 个正在运行的 DS Harness Desktop 实例——NSIS 安装/卸载会按进程名杀掉所有同名进程（会误杀你正在用的窗口），已跳过；退出正式实例后重跑，或加 --force-installer 强行`,
     );
   } else if (!installer) {
-    skipStep('安装器端到端', '产出\\ 下无 *Setup*.exe（npm run build 才产安装包；build:dir 不产）');
+    skipStep('安装器端到端', 'dist\\ 下无 *Setup*.exe（npm run build 才产安装包；build:dir 不产）');
   } else if (fs.existsSync(packedExePath) && fs.statSync(installer).mtimeMs < fs.statSync(packedExePath).mtimeMs) {
     skipStep('安装器端到端', `安装包比当前 win-unpacked 旧（${path.basename(installer)}），先 npm run build 再验证`);
   } else {
@@ -1172,7 +1172,7 @@ async function main() {
         if (!bodyError && shortcutFailures.length > 0) {
           throw new Error(
             `跑完未能做到痕迹全无（快捷方式/注册表）：\n  ${shortcutFailures.join('\n  ')}\n` +
-              '  恢复：产出\\reg-backup-*\\*.reg 手工 reg import；快捷方式重新安装即为原样',
+              '  恢复：dist\\reg-backup-*\\*.reg 手工 reg import；快捷方式重新安装即为原样',
           );
         }
       }

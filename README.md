@@ -113,13 +113,13 @@
 
 ## 从源码构建
 
-本仓库只含**源码**，不含编译好的安装包（`产出\`、`node_modules\`、`runtime\` 均不入库）。
+本仓库只含**源码**，不含编译好的安装包（`dist\`、`node_modules\`、`runtime\` 均不入库）。
 
 1. 安装依赖：`cd app && npm ci`（按 lockfile 精确安装，勿用 `npm install`）
 2. 准备侧车运行时（`app\runtime\`，须含 npm）：`powershell -ExecutionPolicy Bypass -File app\scripts\prepare-runtime.ps1`
    （`npm run build` / `build:dir` 已自动挂钩本步——侧车已就绪则秒过，缺失或版本不符自动补齐）
 3. 开发运行：`cd app && npm start`
-4. 打包 + 体检：`cd app && npm run build` = electron-builder 打包后自动跑 `verify:smoke` 冒烟体检（离线单测 / 静态检查 / 侧车启动 / 包启动 / 安装器端到端；输出「失败 0」即全绿，产物输出到 `产出\`）
+4. 打包 + 体检：`cd app && npm run build` = electron-builder 打包后自动跑 `verify:smoke` 冒烟体检（离线单测 / 静态检查 / 侧车启动 / 包启动 / 安装器端到端；输出「失败 0」即全绿，产物输出到 `dist\`）
 5. 单独体检：`cd app && npm run verify:smoke`（安装器端到端检测到正式实例在跑会自动跳过防误杀）；更新器单测 `cd app && npm test`（24 项离线）；`npm run test:e2e` 追加真实下载安装 + 冒烟验证
 
 > 拿到成品后如何使用见 `docs\使用方法.md`；如何把成品分发给别人见 `docs\分发说明.md`；设计与决策见 `docs\设计方案.md`。
@@ -155,7 +155,7 @@ GitHub Actions（`.github/workflows/release.yml`）会同步版本号、安装�
 | `app\` | Electron 壳源码 + 打包配置 + 更新器 + 测试 | ✅ |
 | `app\scripts\prepare-runtime.ps1` | 准备侧车运行时（Node 24 + npm） | ✅ |
 | `.github\workflows\release.yml` | 打 tag 自动打包并发布 | ✅ |
-| `产出\` | 构建产物（安装包/便携版），发布走 GitHub Releases | ❌ 不入库 |
+| `dist\` | 构建产物（安装包/便携版），发布走 GitHub Releases | ❌ 不入库 |
 | `app\node_modules\`、`app\runtime\` | 依赖与侧车运行时 | ❌ 不入库 |
 
 ## 项目信息

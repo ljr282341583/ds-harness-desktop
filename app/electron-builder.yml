@@ -6,8 +6,8 @@ electronLanguages:
   - en-US
 
 directories:
-  # 产出放到项目级 产出\ 目录
-  output: ../产出
+  # 产物放到项目级 dist\ 目录（必须是纯英文路径：中文路径下 Electron 会秒退 0x80000003）
+  output: ../dist
   buildResources: build
 
 # 打包后用完整 node_modules 覆盖（electron-builder 的生产依赖裁剪对 DSH 依赖树不完整）

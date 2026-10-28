@@ -13,7 +13,7 @@
  * exe 名、进程名、快捷方式名、注册表键名与真实安装**完全不重叠**：即便安装/卸载
  * 再次失控，也碰不到用户的真实安装。
  *
- * 产物：`产出\smoketest\`（Setup 安装包 + `smoketest.json` 清单）。
+ * 产物：`dist\smoketest\`（Setup 安装包 + `smoketest.json` 清单）。
  * verify:smoke 检测到清单后会自动优先使用该隔离构建。
  */
 
@@ -23,7 +23,7 @@ const path = require('node:path');
 
 const appDir = path.join(__dirname, '..');
 const repoDir = path.join(appDir, '..');
-const outDir = path.join(repoDir, '产出', 'smoketest');
+const outDir = path.join(repoDir, 'dist', 'smoketest');
 
 const PRODUCT_NAME = 'DS Harness Desktop SmokeTest';
 const SHORTCUT_NAME = 'DS Harness Desktop SmokeTest';

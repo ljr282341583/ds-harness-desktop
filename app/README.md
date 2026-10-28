@@ -15,7 +15,7 @@ dsh 本体（不重打包），以及外壳自身更新（electron-updater + Git
 | `test/updater.test.js` | 更新器测试（离线单测 + `--e2e` 真实端到端） |
 | `scripts/prepare-runtime.ps1` | 一键准备侧车运行时（Node 24 + 捆绑 npm） |
 | `package.json` | 依赖（捆绑 `@deepseek-ai/dsh`）与脚本 |
-| `electron-builder.yml` | 打包配置（NSIS + portable，产物到 `../产出`） |
+| `electron-builder.yml` | 打包配置（NSIS + portable，产物到 `../dist`） |
 | `build/afterPack.js` | 打包钩子：用 `npm ci --omit=dev` 重建"仅运行时依赖"的 node_modules（并按规则修剪），再做依赖守卫与 rcedit 嵌图标/版本 |
 | `build/icon.ico` | 应用/安装器图标（多尺寸，由 `app-builder icon` 从 PNG 生成） |
 | `build/rcedit-x64.exe` | 手动解压的 rcedit（用于嵌图标；app-builder 内置 rcedit 会去下载 winCodeSign 触发符号链接问题） |
@@ -71,7 +71,7 @@ dsh 本体（不重打包），以及外壳自身更新（electron-updater + Git
 
 ```sh
 npm start          # 开发运行
-npm run build      # 打包 NSIS 安装器 + portable exe（自动先备侧车运行时；产物在 ../产出）
+npm run build      # 打包 NSIS 安装器 + portable exe（自动先备侧车运行时；产物在 ../dist）
 npm test           # 更新器离线单元测试（无网络）
 npm run test:e2e   # 追加真实端到端：下载安装 rc.2 + 冒烟验证 + 激活 + 回滚
 ```

@@ -62,7 +62,7 @@
 cd app && npm ci                  # 按 lockfile 精确安装依赖（勿用 npm install）
 cd app && npm start               # 开发运行（Electron 壳 + 托管 dsh web）
 cd app && npm test                # 离线单测（updater）
-cd app && npm run build:dir       # 打包到 产出\win-unpacked\ + 自动冒烟（日常验证首选）
+cd app && npm run build:dir       # 打包到 dist\win-unpacked\ + 自动冒烟（日常验证首选）
 cd app && npm run build           # 打包 NSIS + portable（发版前用），末尾含体检
 cd app && npm run verify:smoke    # 单独跑体检（本机有真实安装时 [5] 默认 SKIP）
 cd app && npm run build:smoketest # 生成体检专用「隔离命名」安装包（要跑 [5] 必须先出它）
@@ -78,3 +78,8 @@ cd app && npm run build:smoketest # 生成体检专用「隔离命名」安装�
 6. 版本判断只认顶层 `@deepseek-ai/dsh` 的 dist-tags；同族子包的 `latest` 已过期（停在 `0.0.1-rc.1`）。
 7. `@deepseek-ai/dsh` 依赖使用精确版本，不使用 `^`。
 8. 上游 RC 包同版本号可能被重新发布为不同内容，需以 `dist.integrity` 而非仅版本号判断。
+9. **agent 会话会把仓库目录标成 Low integrity（低完整性）**，产物继承该标签后**无法双击运行**：
+   Electron 秒退 `0x80000003`（Chromium 沙箱初始化失败），NSIS 安装包报
+   `Error writing temporary file`。要在工作区内直接运行产物，先在**普通 PowerShell**
+   （不要用 agent 会话）跑 `icacls dist /setintegritylevel Medium /T /C`，或双击仓库根
+   `unlock-artifacts.cmd`。每次重新打包都要再跑一次（新文件会重新继承 Low 标签）。
